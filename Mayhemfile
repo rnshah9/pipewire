@@ -1,0 +1,7 @@
+project: rnshah9/pipewire
+target: pipewire
+tests:
+  - file://mid.mid
+
+cmds:
+  - cmd: /repo/builddir/src/tools/pw-mididump @@
