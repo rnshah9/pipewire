@@ -1,5 +1,5 @@
 project: rnshah9/pipewire
-target: pipewire
+target: pw-mididump
 tests:
   - file://mid.mid
 
