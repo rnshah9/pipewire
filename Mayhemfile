@@ -1,6 +1,6 @@
-project: rnshah9/pipewire
+project: pipewire
 target: pw-mididump
-tests:
+testsuite:
   - file://mid.mid
 
 cmds:
