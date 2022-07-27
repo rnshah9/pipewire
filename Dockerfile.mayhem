@@ -4,16 +4,12 @@ RUN apt-get update
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential python3 python3-pip pkg-config libdbus-1-dev libasound-dev libudev-dev git ninja-build libsndfile-dev
 RUN pip3 install meson
 
-ADD . /repo
+COPY . /repo
 WORKDIR /repo
-RUN meson setup builddir -Dpw-cat=enabled
+RUN meson setup builddir -Dpw-cat=enabled --prefix=/install
 RUN ninja -C builddir
-
-RUN mkdir -p /deps
-RUN ldd /repo/builddir/src/tools/pw-mididump | tr -s '[:blank:]' '\n' | grep '^/' | xargs -I % sh -c 'cp % /deps;'
+RUN ninja -C builddir install
 
 FROM ubuntu:20.04 as package
-
-COPY --from=builder /deps /deps
-COPY --from=builder /repo/builddir/src/tools/pw-mididump /repo/builddir/src/tools/pw-mididump
-ENV LD_LIBRARY_PATH=/deps
+COPY --from=builder /install /install
+ENV LD_LIBRARY_PATH=/install/lib/x86_64-linux-gnu

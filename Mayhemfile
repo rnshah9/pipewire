@@ -4,4 +4,4 @@ testsuite:
   - file://mid.mid
 
 cmds:
-  - cmd: /repo/builddir/src/tools/pw-mididump @@
+  - cmd: /pw-mididump @@
