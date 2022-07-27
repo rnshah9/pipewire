@@ -4,4 +4,4 @@ testsuite:
   - file://mid.mid
 
 cmds:
-  - cmd: /pw-mididump @@
+  - cmd: /install/bin/pw-mididump @@
