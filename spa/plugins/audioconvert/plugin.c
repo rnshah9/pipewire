@@ -27,11 +27,6 @@
 #include <spa/support/plugin.h>
 
 extern const struct spa_handle_factory spa_audioconvert_factory;
-extern const struct spa_handle_factory spa_fmtconvert_factory;
-extern const struct spa_handle_factory spa_channelmix_factory;
-extern const struct spa_handle_factory spa_resample_factory;
-extern const struct spa_handle_factory spa_splitter_factory;
-extern const struct spa_handle_factory spa_merger_factory;
 extern const struct spa_handle_factory spa_audioadapter_factory;
 
 SPA_EXPORT
@@ -45,21 +40,6 @@ int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t 
 		*factory = &spa_audioconvert_factory;
 		break;
 	case 1:
-		*factory = &spa_fmtconvert_factory;
-		break;
-	case 2:
-		*factory = &spa_channelmix_factory;
-		break;
-	case 3:
-		*factory = &spa_resample_factory;
-		break;
-	case 4:
-		*factory = &spa_splitter_factory;
-		break;
-	case 5:
-		*factory = &spa_merger_factory;
-		break;
-	case 6:
 		*factory = &spa_audioadapter_factory;
 		break;
 	default:

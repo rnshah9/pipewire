@@ -229,8 +229,8 @@ static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
 	return sizeof(conf);
 }
 
-static int codec_caps_preference_cmp(const struct a2dp_codec *codec, const void *caps1, size_t caps1_size,
-		const void *caps2, size_t caps2_size, const struct a2dp_codec_audio_info *info)
+static int codec_caps_preference_cmp(const struct a2dp_codec *codec, uint32_t flags, const void *caps1, size_t caps1_size,
+		const void *caps2, size_t caps2_size, const struct a2dp_codec_audio_info *info, const struct spa_dict *global_settings)
 {
 	a2dp_sbc_t conf1, conf2;
 	a2dp_sbc_t *conf;
@@ -356,7 +356,7 @@ static int codec_set_bitpool(struct impl *this, int bitpool)
 	return this->sbc.bitpool;
 }
 
-static int codec_enum_config(const struct a2dp_codec *codec,
+static int codec_enum_config(const struct a2dp_codec *codec, uint32_t flags,
 		const void *caps, size_t caps_size, uint32_t id, uint32_t idx,
 		struct spa_pod_builder *b, struct spa_pod **param)
 {

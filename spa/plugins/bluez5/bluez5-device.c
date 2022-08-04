@@ -301,6 +301,8 @@ static void emit_info(struct impl *this, bool full);
 
 static float get_soft_volume_boost(struct node *node)
 {
+	const struct a2dp_codec *codec = node->transport ? node->transport->a2dp_codec : NULL;
+
 	/*
 	 * For A2DP duplex, the duplex microphone channel sometimes does not appear
 	 * to have hardware gain, and input volume is very low.
@@ -310,7 +312,8 @@ static float get_soft_volume_boost(struct node *node)
 	 * If this causes clipping, the user can just reduce the mic volume to
 	 * bring SW gain below 1.
 	 */
-	if (node->a2dp_duplex && node->transport &&
+	if (node->a2dp_duplex && node->transport && codec && codec->info &&
+			spa_atob(spa_dict_lookup(codec->info, "duplex.boost")) &&
 			node->id == DEVICE_ID_SOURCE &&
 			!node->transport->volumes[SPA_BT_VOLUME_ID_RX].active)
 		return 10.0f;	/* 20 dB boost */
@@ -337,34 +340,56 @@ static void node_update_soft_volumes(struct node *node, float hw_volume)
 	}
 }
 
-static void volume_changed(void *userdata)
+static bool node_update_volume_from_transport(struct node *node, bool reset)
 {
-	struct node *node = userdata;
 	struct impl *impl = node->impl;
 	struct spa_bt_transport_volume *t_volume;
 	float prev_hw_volume;
 
 	if (!node->transport || !spa_bt_transport_volume_enabled(node->transport))
-		return;
+		return false;
 
 	/* PW is the controller for remote device. */
 	if (impl->profile != DEVICE_PROFILE_A2DP
 	    && impl->profile !=  DEVICE_PROFILE_HSP_HFP)
-		return;
+		return false;
 
 	t_volume = &node->transport->volumes[node->id];
 
 	if (!t_volume->active)
-		return;
+		return false;
 
 	prev_hw_volume = node_get_hw_volume(node);
-	for (uint32_t i = 0; i < node->n_channels; ++i) {
-		node->volumes[i] = prev_hw_volume > 0.0f
-			? node->volumes[i] * t_volume->volume / prev_hw_volume
-			: t_volume->volume;
+
+	if (!reset) {
+		for (uint32_t i = 0; i < node->n_channels; ++i) {
+			node->volumes[i] = prev_hw_volume > 0.0f
+				? node->volumes[i] * t_volume->volume / prev_hw_volume
+				: t_volume->volume;
+		}
+	} else {
+		for (uint32_t i = 0; i < node->n_channels; ++i)
+			node->volumes[i] = t_volume->volume;
 	}
 
 	node_update_soft_volumes(node, t_volume->volume);
+
+	/*
+	 * Consider volume changes from the headset as requested
+	 * by the user, and to be saved by the SM.
+	 */
+	node->save = true;
+
+	return true;
+}
+
+static void volume_changed(void *userdata)
+{
+	struct node *node = userdata;
+	struct impl *impl = node->impl;
+
+	if (!node_update_volume_from_transport(node, false))
+		return;
 
 	emit_volume(impl, node);
 
@@ -468,6 +493,8 @@ static void emit_node(struct impl *this, struct spa_bt_transport *t,
 			for (i = prev_channels; i < this->nodes[id].n_channels; ++i)
 				this->nodes[id].volumes[i] = this->nodes[id].volumes[i % prev_channels];
 		}
+
+		node_update_volume_from_transport(&this->nodes[id], true);
 
 		boost = get_soft_volume_boost(&this->nodes[id]);
 		if (boost != 1.0f) {
@@ -888,7 +915,7 @@ static void profiles_changed(void *userdata, uint32_t prev_profiles, uint32_t pr
 	if (this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SINK) {
 		free(this->supported_codecs);
 		this->supported_codecs = spa_bt_device_get_supported_a2dp_codecs(
-			this->bt_dev, &this->supported_codec_count);
+			this->bt_dev, &this->supported_codec_count, true);
 	}
 
 	switch (this->profile) {
@@ -1103,7 +1130,7 @@ static void set_initial_profile(struct impl *this)
 	if (this->supported_codecs)
 		free(this->supported_codecs);
 	this->supported_codecs = spa_bt_device_get_supported_a2dp_codecs(
-					this->bt_dev, &this->supported_codec_count);
+		this->bt_dev, &this->supported_codec_count, true);
 
 	/* Prefer A2DP, then HFP, then null, but select AG if the device
 	   appears not to have A2DP_SINK or any HEAD_UNIT profile */
@@ -1301,16 +1328,17 @@ static bool validate_profile(struct impl *this, uint32_t profile,
 }
 
 static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
-		uint32_t id, uint32_t port, uint32_t dev, uint32_t profile)
+		uint32_t id, uint32_t port, uint32_t profile)
 {
 	struct spa_bt_device *device = this->bt_dev;
 	struct spa_pod_frame f[2];
 	enum spa_direction direction;
-	const char *name_prefix, *description, *port_type;
+	const char *name_prefix, *description, *hfp_description, *port_type;
 	enum spa_bt_form_factor ff;
 	enum spa_bluetooth_audio_codec codec;
 	char name[128];
 	uint32_t i, j, mask, next;
+	uint32_t dev = SPA_ID_INVALID, enum_dev;
 
 	ff = spa_bt_form_factor_from_class(device->bluetooth_class);
 
@@ -1318,52 +1346,62 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 	case SPA_BT_FORM_FACTOR_HEADSET:
 		name_prefix = "headset";
 		description = _("Headset");
+		hfp_description = _("Handsfree");
 		port_type = "headset";
 		break;
 	case SPA_BT_FORM_FACTOR_HANDSFREE:
 		name_prefix = "handsfree";
 		description = _("Handsfree");
+		hfp_description = _("Handsfree (HFP)");
 		port_type = "handsfree";
 		break;
 	case SPA_BT_FORM_FACTOR_MICROPHONE:
 		name_prefix = "microphone";
 		description = _("Microphone");
+		hfp_description = _("Handsfree");
 		port_type = "mic";
 		break;
 	case SPA_BT_FORM_FACTOR_SPEAKER:
 		name_prefix = "speaker";
 		description = _("Speaker");
+		hfp_description = _("Handsfree");
 		port_type = "speaker";
 		break;
 	case SPA_BT_FORM_FACTOR_HEADPHONE:
 		name_prefix = "headphone";
 		description = _("Headphone");
+		hfp_description = _("Handsfree");
 		port_type = "headphones";
 		break;
 	case SPA_BT_FORM_FACTOR_PORTABLE:
 		name_prefix = "portable";
 		description = _("Portable");
+		hfp_description = _("Handsfree");
 		port_type = "portable";
 		break;
 	case SPA_BT_FORM_FACTOR_CAR:
 		name_prefix = "car";
 		description = _("Car");
+		hfp_description = _("Handsfree");
 		port_type = "car";
 		break;
 	case SPA_BT_FORM_FACTOR_HIFI:
 		name_prefix = "hifi";
 		description = _("HiFi");
+		hfp_description = _("Handsfree");
 		port_type = "hifi";
 		break;
 	case SPA_BT_FORM_FACTOR_PHONE:
 		name_prefix = "phone";
 		description = _("Phone");
+		hfp_description = _("Handsfree");
 		port_type = "phone";
 		break;
 	case SPA_BT_FORM_FACTOR_UNKNOWN:
 	default:
 		name_prefix = "bluetooth";
 		description = _("Bluetooth");
+		hfp_description = _("Bluetooth (HFP)");
 		port_type = "bluetooth";
 		break;
 	}
@@ -1372,12 +1410,47 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 	case 0:
 		direction = SPA_DIRECTION_INPUT;
 		snprintf(name, sizeof(name), "%s-input", name_prefix);
+		enum_dev = DEVICE_ID_SOURCE;
+		if (profile == DEVICE_PROFILE_A2DP)
+			dev = enum_dev;
+		else if (profile != SPA_ID_INVALID)
+			enum_dev = SPA_ID_INVALID;
 		break;
 	case 1:
 		direction = SPA_DIRECTION_OUTPUT;
 		snprintf(name, sizeof(name), "%s-output", name_prefix);
+		enum_dev = DEVICE_ID_SINK;
+		if (profile == DEVICE_PROFILE_A2DP)
+			dev = enum_dev;
+		else if (profile != SPA_ID_INVALID)
+			enum_dev = SPA_ID_INVALID;
+		break;
+	case 2:
+		direction = SPA_DIRECTION_INPUT;
+		snprintf(name, sizeof(name), "%s-hf-input", name_prefix);
+		description = hfp_description;
+		enum_dev = DEVICE_ID_SOURCE;
+		if (profile == DEVICE_PROFILE_HSP_HFP)
+			dev = enum_dev;
+		else if (profile != SPA_ID_INVALID)
+			enum_dev = SPA_ID_INVALID;
+		break;
+	case 3:
+		direction = SPA_DIRECTION_OUTPUT;
+		snprintf(name, sizeof(name), "%s-hf-output", name_prefix);
+		description = hfp_description;
+		enum_dev = DEVICE_ID_SINK;
+		if (profile == DEVICE_PROFILE_HSP_HFP)
+			dev = enum_dev;
+		else if (profile != SPA_ID_INVALID)
+			enum_dev = SPA_ID_INVALID;
 		break;
 	default:
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if (enum_dev == SPA_ID_INVALID) {
 		errno = EINVAL;
 		return NULL;
 	}
@@ -1405,6 +1478,11 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 	mask = 0;
 	for (i = 1; (j = get_profile_from_index(this, i, &next, &codec)) != SPA_ID_INVALID; i = next) {
 		uint32_t profile_mask;
+
+		if (j == DEVICE_PROFILE_A2DP && !(port == 0 || port == 1))
+			continue;
+		if (j == DEVICE_PROFILE_HSP_HFP && !(port == 2 || port == 3))
+			continue;
 
 		profile_mask = profile_direction_mask(this, j, codec);
 		if (!(profile_mask & (1 << direction)))
@@ -1472,8 +1550,7 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 
 	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_devices, 0);
 	spa_pod_builder_push_array(b, &f[1]);
-	/* port and device indexes are the same, 0=source, 1=sink */
-	spa_pod_builder_int(b, port);
+	spa_pod_builder_int(b, enum_dev);
 	spa_pod_builder_pop(b, &f[1]);
 
 	if (profile != SPA_ID_INVALID) {
@@ -1640,9 +1717,8 @@ static int impl_enum_params(void *object, int seq,
 	case SPA_PARAM_EnumRoute:
 	{
 		switch (result.index) {
-		case 0: case 1:
-			param = build_route(this, &b, id, result.index,
-					SPA_ID_INVALID, SPA_ID_INVALID);
+		case 0: case 1: case 2: case 3:
+			param = build_route(this, &b, id, result.index, SPA_ID_INVALID);
 			if (param == NULL)
 				goto next;
 			break;
@@ -1654,9 +1730,8 @@ static int impl_enum_params(void *object, int seq,
 	case SPA_PARAM_Route:
 	{
 		switch (result.index) {
-		case 0: case 1:
-			param = build_route(this, &b, id, result.index,
-					result.index, this->profile);
+		case 0: case 1: case 2: case 3:
+			param = build_route(this, &b, id, result.index, this->profile);
 			if (param == NULL)
 				goto next;
 			break;

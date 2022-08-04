@@ -44,6 +44,7 @@
 #include <unistd.h>
 
 #include <spa/pod/builder.h>
+#include <spa/utils/result.h>
 
 #include <gst/net/gstnetclientclock.h>
 #include <gst/allocators/gstfdmemory.h>
@@ -69,6 +70,7 @@ enum
   PROP_PATH,
   PROP_TARGET_OBJECT,
   PROP_CLIENT_NAME,
+  PROP_CLIENT_PROPERTIES,
   PROP_STREAM_PROPERTIES,
   PROP_ALWAYS_COPY,
   PROP_MIN_BUFFERS,
@@ -127,10 +129,17 @@ gst_pipewire_src_set_property (GObject * object, guint prop_id,
       pwsrc->client_name = g_value_dup_string (value);
       break;
 
+    case PROP_CLIENT_PROPERTIES:
+      if (pwsrc->client_properties)
+        gst_structure_free (pwsrc->client_properties);
+      pwsrc->client_properties =
+          gst_structure_copy (gst_value_get_structure (value));
+      break;
+
     case PROP_STREAM_PROPERTIES:
-      if (pwsrc->properties)
-        gst_structure_free (pwsrc->properties);
-      pwsrc->properties =
+      if (pwsrc->stream_properties)
+        gst_structure_free (pwsrc->stream_properties);
+      pwsrc->stream_properties =
           gst_structure_copy (gst_value_get_structure (value));
       break;
 
@@ -183,8 +192,12 @@ gst_pipewire_src_get_property (GObject * object, guint prop_id,
       g_value_set_string (value, pwsrc->client_name);
       break;
 
+    case PROP_CLIENT_PROPERTIES:
+      gst_value_set_structure (value, pwsrc->client_properties);
+      break;
+
     case PROP_STREAM_PROPERTIES:
-      gst_value_set_structure (value, pwsrc->properties);
+      gst_value_set_structure (value, pwsrc->stream_properties);
       break;
 
     case PROP_ALWAYS_COPY:
@@ -249,8 +262,10 @@ gst_pipewire_src_finalize (GObject * object)
 {
   GstPipeWireSrc *pwsrc = GST_PIPEWIRE_SRC (object);
 
-  if (pwsrc->properties)
-    gst_structure_free (pwsrc->properties);
+  if (pwsrc->stream_properties)
+    gst_structure_free (pwsrc->stream_properties);
+  if (pwsrc->client_properties)
+    gst_structure_free (pwsrc->client_properties);
   if (pwsrc->clock)
     gst_object_unref (pwsrc->clock);
   g_free (pwsrc->path);
@@ -305,6 +320,15 @@ gst_pipewire_src_class_init (GstPipeWireSrcClass * klass)
                                                         NULL,
                                                         G_PARAM_READWRITE |
                                                         G_PARAM_STATIC_STRINGS));
+
+  g_object_class_install_property (gobject_class,
+                                   PROP_CLIENT_PROPERTIES,
+                                   g_param_spec_boxed ("client-properties",
+                                                       "client properties",
+                                                       "list of PipeWire client properties",
+                                                       GST_TYPE_STRUCTURE,
+                                                       G_PARAM_READWRITE |
+                                                       G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class,
                                    PROP_STREAM_PROPERTIES,
@@ -420,6 +444,7 @@ buffer_recycle (GstMiniObject *obj)
 {
   GstPipeWireSrc *src;
   GstPipeWirePoolData *data;
+  int res;
 
   data = gst_pipewire_pool_get_data (GST_BUFFER_CAST(obj));
 
@@ -443,8 +468,11 @@ buffer_recycle (GstMiniObject *obj)
 
   data->queued = TRUE;
 
-  GST_LOG_OBJECT (src, "recycle buffer %p", obj);
-  pw_stream_queue_buffer (src->stream, data->b);
+  if ((res = pw_stream_queue_buffer (src->stream, data->b)) < 0)
+    GST_WARNING_OBJECT (src, "can't queue recycled buffer %p, %s", obj, spa_strerror(res));
+  else
+    GST_LOG_OBJECT (src, "recycle buffer %p", obj);
+
   pw_thread_loop_unlock (src->core->loop);
 
   GST_OBJECT_UNLOCK (data->pool);
@@ -458,9 +486,9 @@ on_add_buffer (void *_data, struct pw_buffer *b)
   GstPipeWireSrc *pwsrc = _data;
   GstPipeWirePoolData *data;
 
-  GST_DEBUG_OBJECT (pwsrc, "add buffer");
   gst_pipewire_pool_wrap_buffer (pwsrc->pool, b);
   data = b->user_data;
+  GST_DEBUG_OBJECT (pwsrc, "add buffer %p", data->buf);
   data->owner = pwsrc;
   data->queued = TRUE;
   GST_MINI_OBJECT_CAST (data->buf)->dispose = buffer_recycle;
@@ -472,15 +500,18 @@ on_remove_buffer (void *_data, struct pw_buffer *b)
   GstPipeWireSrc *pwsrc = _data;
   GstPipeWirePoolData *data = b->user_data;
   GstBuffer *buf = data->buf;
+  int res;
 
   GST_DEBUG_OBJECT (pwsrc, "remove buffer %p", buf);
 
   GST_MINI_OBJECT_CAST (buf)->dispose = NULL;
 
-  if (data->queued)
+  if (data->queued) {
     gst_buffer_unref (buf);
-  else
-    pw_stream_queue_buffer (pwsrc->stream, b);
+  } else {
+    if ((res = pw_stream_queue_buffer (pwsrc->stream, b)) < 0)
+      GST_WARNING_OBJECT (pwsrc, "can't queue removed buffer %p, %s", buf, spa_strerror(res));
+  }
 }
 
 static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
@@ -497,14 +528,21 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
           return NULL;
 
   data = b->user_data;
-  buf = data->buf;
 
-  GST_LOG_OBJECT (pwsrc, "got new buffer %p", buf);
+  if (!GST_IS_BUFFER (data->buf)) {
+    GST_ERROR_OBJECT (pwsrc, "stream buffer %p is missing", data->buf);
+    return NULL;
+  }
 
   if (!data->queued) {
-    GST_WARNING_OBJECT (pwsrc, "buffer %p was not recycled", buf);
-    gst_buffer_ref (buf);
+    GST_ERROR_OBJECT (pwsrc, "buffer %p was not recycled", data->buf);
+    return NULL;
   }
+
+  GST_LOG_OBJECT (pwsrc, "got new buffer %p", data->buf);
+
+  buf = gst_buffer_new ();
+
   data->queued = FALSE;
   GST_BUFFER_PTS (buf) = GST_CLOCK_TIME_NONE;
   GST_BUFFER_DTS (buf) = GST_CLOCK_TIME_NONE;
@@ -530,12 +568,16 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
       meta->height = crop->region.size.height;
     }
   }
+  gst_buffer_add_parent_buffer_meta (buf, data->buf);
+  gst_buffer_unref (data->buf);
   for (i = 0; i < b->buffer->n_datas; i++) {
     struct spa_data *d = &b->buffer->datas[i];
-    GstMemory *mem = gst_buffer_peek_memory (buf, i);
-    mem->offset = SPA_MIN(d->chunk->offset, d->maxsize);
-    mem->size = SPA_MIN(d->chunk->size, d->maxsize - mem->offset);
-    mem->offset += data->offset;
+    GstMemory *pmem = gst_buffer_peek_memory (data->buf, i);
+    if (pmem) {
+      GstMemory *mem = gst_memory_share (pmem, d->chunk->offset, d->chunk->size);
+      gst_buffer_insert_memory (buf, i, mem);
+      spa_assert_se(mem->size <= mem->maxsize);
+    }
     if (d->chunk->flags & SPA_CHUNK_FLAG_CORRUPTED)
       GST_BUFFER_FLAG_SET (buf, GST_BUFFER_FLAG_CORRUPTED);
   }
@@ -604,7 +646,7 @@ gst_pipewire_src_stream_start (GstPipeWireSrc *pwsrc)
   GST_DEBUG_OBJECT (pwsrc, "doing stream start");
 
   pw_thread_loop_get_time (pwsrc->core->loop, &abstime,
-		  GST_PIPEWIRE_DEFAULT_TIMEOUT * SPA_NSEC_PER_SEC);
+                  GST_PIPEWIRE_DEFAULT_TIMEOUT * SPA_NSEC_PER_SEC);
 
   while (TRUE) {
     enum pw_stream_state state = pw_stream_get_state (pwsrc->stream, &error);
@@ -654,7 +696,7 @@ wait_started (GstPipeWireSrc *this)
   pw_thread_loop_lock (this->core->loop);
 
   pw_thread_loop_get_time (this->core->loop, &abstime,
-		  GST_PIPEWIRE_DEFAULT_TIMEOUT * SPA_NSEC_PER_SEC);
+                  GST_PIPEWIRE_DEFAULT_TIMEOUT * SPA_NSEC_PER_SEC);
 
   while (TRUE) {
     state = pw_stream_get_state (this->stream, &error);
@@ -679,7 +721,7 @@ wait_started (GstPipeWireSrc *this)
     }
   }
   GST_DEBUG_OBJECT (this, "got started signal: %s",
-		  pw_stream_state_as_string (state));
+                  pw_stream_state_as_string (state));
   pw_thread_loop_unlock (this->core->loop);
 
   return state;
@@ -782,7 +824,7 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
   g_ptr_array_free (possible, TRUE);
 
   pw_thread_loop_get_time (pwsrc->core->loop, &abstime,
-		  GST_PIPEWIRE_DEFAULT_TIMEOUT * SPA_NSEC_PER_SEC);
+                  GST_PIPEWIRE_DEFAULT_TIMEOUT * SPA_NSEC_PER_SEC);
 
   while (TRUE) {
     enum pw_stream_state state = pw_stream_get_state (pwsrc->stream, &error);
@@ -860,7 +902,7 @@ on_param_changed (void *data, uint32_t id,
     return;
   }
   if (pwsrc->caps)
-	  gst_caps_unref(pwsrc->caps);
+          gst_caps_unref(pwsrc->caps);
   pwsrc->caps = gst_caps_from_format (param);
   GST_DEBUG_OBJECT (pwsrc, "we got format %" GST_PTR_FORMAT, pwsrc->caps);
 
@@ -882,8 +924,8 @@ on_param_changed (void *data, uint32_t id,
         SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
         SPA_PARAM_BUFFERS_stride,  SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
         SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(
-						(1<<SPA_DATA_MemFd) |
-						(1<<SPA_DATA_MemPtr)));
+                                                (1<<SPA_DATA_MemFd) |
+                                                (1<<SPA_DATA_MemPtr)));
 
     params[1] = spa_pod_builder_add_object (&b,
         SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
@@ -992,10 +1034,10 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
 
   pwsrc = GST_PIPEWIRE_SRC (psrc);
 
+  pw_thread_loop_lock (pwsrc->core->loop);
   if (!pwsrc->negotiated)
     goto not_negotiated;
 
-  pw_thread_loop_lock (pwsrc->core->loop);
   while (TRUE) {
     enum pw_stream_state state;
 
@@ -1031,7 +1073,7 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
       buf = dequeue_buffer (pwsrc);
       GST_LOG_OBJECT (pwsrc, "popped buffer %p", buf);
       if (buf != NULL) {
-	if (pwsrc->resend_last || pwsrc->keepalive_time > 0)
+        if (pwsrc->resend_last || pwsrc->keepalive_time > 0)
           gst_buffer_replace (&pwsrc->last_buffer, buf);
         break;
       }
@@ -1040,7 +1082,7 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
     if (pwsrc->keepalive_time > 0) {
       struct timespec abstime;
       pw_thread_loop_get_time(pwsrc->core->loop, &abstime,
-		      pwsrc->keepalive_time * SPA_NSEC_PER_MSEC);
+                      pwsrc->keepalive_time * SPA_NSEC_PER_MSEC);
       if (pw_thread_loop_timed_wait_full (pwsrc->core->loop, &abstime) == -ETIMEDOUT)
         timeout = TRUE;
     } else {
@@ -1092,6 +1134,7 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
 
 not_negotiated:
   {
+    pw_thread_loop_unlock (pwsrc->core->loop);
     return GST_FLOW_NOT_NEGOTIATED;
   }
 streaming_eos:
@@ -1176,12 +1219,17 @@ gst_pipewire_src_open (GstPipeWireSrc * pwsrc)
   pw_thread_loop_lock (pwsrc->core->loop);
 
   props = pw_properties_new (NULL, NULL);
+  if (pwsrc->client_properties) {
+    gst_structure_foreach (pwsrc->client_properties, copy_properties, props);
+    pw_core_update_properties (pwsrc->core->core, &props->dict);
+    pw_properties_clear(props);
+  }
   if (pwsrc->client_name) {
     pw_properties_set (props, PW_KEY_NODE_NAME, pwsrc->client_name);
     pw_properties_set (props, PW_KEY_NODE_DESCRIPTION, pwsrc->client_name);
   }
-  if (pwsrc->properties) {
-    gst_structure_foreach (pwsrc->properties, copy_properties, props);
+  if (pwsrc->stream_properties) {
+    gst_structure_foreach (pwsrc->stream_properties, copy_properties, props);
   }
 
   if ((pwsrc->stream = pw_stream_new (pwsrc->core->core,
@@ -1309,7 +1357,9 @@ gst_pipewire_src_change_state (GstElement * element, GstStateChange transition)
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
       break;
     case GST_STATE_CHANGE_PAUSED_TO_READY:
+      pw_thread_loop_lock (this->core->loop);
       this->negotiated = FALSE;
+      pw_thread_loop_unlock (this->core->loop);
       break;
     case GST_STATE_CHANGE_READY_TO_NULL:
       gst_pipewire_src_close (this);

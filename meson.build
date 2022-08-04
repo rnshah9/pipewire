@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.51',
+  version : '0.3.56',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.59.0',
   default_options : [ 'warning_level=3',
@@ -266,6 +266,7 @@ if not readline_dep.found()
 endif
 
 summary({'readline (for pw-cli)': readline_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+cdata.set('HAVE_READLINE', readline_dep.found())
 ncurses_dep = dependency('ncursesw', required : false)
 sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : get_option('sndfile'))
 summary({'sndfile': sndfile_dep.found()}, bool_yn: true, section: 'pw-cat/pw-play/pw-dump/filter-chain')
@@ -293,6 +294,11 @@ cdata.set('HAVE_LIBUSB', libusb_dep.found())
 
 cap_lib = dependency('libcap', required : false)
 cdata.set('HAVE_LIBCAP', cap_lib.found())
+
+glib2_dep = dependency('glib-2.0', required : get_option('flatpak'))
+summary({'GLib-2.0 (Flatpak support)': glib2_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+flatpak_support = glib2_dep.found()
+cdata.set('HAVE_GLIB2', flatpak_support)
 
 gst_option = get_option('gstreamer')
 gst_deps_def = {
@@ -335,16 +341,16 @@ webrtc_dep = dependency('webrtc-audio-processing',
 summary({'WebRTC Echo Canceling': webrtc_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 cdata.set('HAVE_WEBRTC', webrtc_dep.found())
 
-# On FreeBSD, epoll-shim library is required for eventfd() and timerfd()
-epoll_shim_dep = (build_machine.system() == 'freebsd'
+# On FreeBSD and MidnightBSD, epoll-shim library is required for eventfd() and timerfd()
+epoll_shim_dep = (build_machine.system() == 'freebsd' or build_machine.system() == 'midnightbsd'
     ? dependency('epoll-shim', required: true)
     : dependency('', required: false))
 
-libinotify_dep = (build_machine.system() == 'freebsd'
+libinotify_dep = (build_machine.system() == 'freebsd' or build_machine.system() == 'midnightbsd'
     ? dependency('libinotify', required: true)
     : dependency('', required: false))
 
-# On FreeBSD, libintl library is required for gettext
+# On FreeBSD and MidnightBSD, libintl library is required for gettext
 libintl_dep = cc.find_library('intl', required: false)
 if not libintl_dep.found()
     libintl_dep = dependency('intl', required: false)
@@ -355,8 +361,8 @@ need_alsa = get_option('pipewire-alsa').enabled() or 'media-session' in get_opti
 alsa_dep = dependency('alsa', version : '>=1.1.7', required: need_alsa)
 summary({'pipewire-alsa': alsa_dep.found()}, bool_yn: true)
 
-if build_machine.system() == 'freebsd'
-# On FreeBSD the OpenSSL library may come from base or a package.
+if build_machine.system() == 'freebsd' or build_machine.system() == 'midnightbsd'
+# On FreeBSD and MidnightBSD the OpenSSL library may come from base or a package.
 # Check for a package first and fallback to the base library if we can't find it via pkgconfig
     openssl_lib = dependency('openssl', required: false)
     if not openssl_lib.found()
@@ -375,6 +381,7 @@ check_functions = [
   ['gettid', '#include <unistd.h>', ['-D_GNU_SOURCE'], []],
   ['memfd_create', '#include <sys/mman.h>', ['-D_GNU_SOURCE'], []],
   ['getrandom', '#include <stddef.h>\n#include <sys/random.h>', ['-D_GNU_SOURCE'], []],
+  ['reallocarray', '#include <stdlib.h>', ['-D_GNU_SOURCE'], []],
   ['sigabbrev_np', '#include <string.h>', ['-D_GNU_SOURCE'], []],
   ['XSetIOErrorExitHandler', '#include <X11/Xlib.h>', [], [x11_dep]],
 ]

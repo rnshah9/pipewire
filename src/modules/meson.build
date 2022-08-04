@@ -5,6 +5,7 @@ subdir('spa')
 module_sources = [
   'module-access.c',
   'module-adapter.c',
+  'module-avb.c',
   'module-client-device.c',
   'module-client-node.c',
   'module-echo-cancel.c',
@@ -15,6 +16,7 @@ module_sources = [
   'module-link-factory.c',
   'module-loopback.c',
   'module-metadata.c',
+  'module-pipe-tunnel.c',
   'module-portal.c',
   'module-profiler.c',
   'module-protocol-native.c',
@@ -31,12 +33,17 @@ module_sources = [
   'module-x11-bell.c',
 ]
 
+pipewire_module_access_deps = [spa_dep, mathlib, dl_lib, pipewire_dep]
+if flatpak_support
+  pipewire_module_access_deps += glib2_dep
+endif
+
 pipewire_module_access = shared_library('pipewire-module-access', [ 'module-access.c' ],
   include_directories : [configinc],
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
-  dependencies : [spa_dep, mathlib, dl_lib, pipewire_dep],
+  dependencies : pipewire_module_access_deps
 )
 
 pipewire_module_loopback = shared_library('pipewire-module-loopback',
@@ -275,6 +282,10 @@ if avahi_dep.found()
   cdata.set('HAVE_AVAHI', true)
 endif
 
+if flatpak_support
+  pipewire_module_protocol_pulse_deps += glib2_dep
+endif
+
 pipewire_module_protocol_pulse = shared_library('pipewire-module-protocol-pulse',
   pipewire_module_protocol_pulse_sources,
   include_directories : [configinc],
@@ -297,6 +308,15 @@ if build_module_pulse_tunnel
 )
 endif
 summary({'pulse-tunnel': build_module_pulse_tunnel}, bool_yn: true, section: 'Optional Modules')
+
+pipewire_module_pipe_tunnel = shared_library('pipewire-module-pipe-tunnel',
+  [ 'module-pipe-tunnel.c' ],
+  include_directories : [configinc],
+  install : true,
+  install_dir : modules_install_dir,
+  install_rpath: modules_install_dir,
+  dependencies : [mathlib, dl_lib, pipewire_dep],
+)
 
 pipewire_module_protocol_simple = shared_library('pipewire-module-protocol-simple',
   [ 'module-protocol-simple.c' ],
@@ -506,3 +526,30 @@ pipewire_module_fallback_sink = shared_library('pipewire-module-fallback-sink',
   install_rpath: modules_install_dir,
   dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep],
 )
+
+build_module_avb = get_option('avb').allowed()
+if build_module_avb
+pipewire_module_avb = shared_library('pipewire-module-avb',
+  [ 'module-avb.c',
+    'module-avb/avb.c',
+    'module-avb/adp.c',
+    'module-avb/acmp.c',
+    'module-avb/aecp.c',
+    'module-avb/aecp-aem.c',
+    'module-avb/avdecc.c',
+    'module-avb/maap.c',
+    'module-avb/mmrp.c',
+    'module-avb/mrp.c',
+    'module-avb/msrp.c',
+    'module-avb/mvrp.c',
+    'module-avb/srp.c',
+    'module-avb/stream.c'
+    ],
+  include_directories : [configinc],
+  install : true,
+  install_dir : modules_install_dir,
+  install_rpath: modules_install_dir,
+  dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep],
+)
+endif
+summary({'avb': build_module_avb}, bool_yn: true, section: 'Optional Modules')

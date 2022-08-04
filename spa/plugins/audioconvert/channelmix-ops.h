@@ -29,10 +29,6 @@
 #include <spa/utils/string.h>
 #include <spa/param/audio/raw.h>
 
-#undef SPA_LOG_TOPIC_DEFAULT
-#define SPA_LOG_TOPIC_DEFAULT log_topic
-extern struct spa_log_topic *log_topic;
-
 #include "crossover.h"
 #include "delay.h"
 
@@ -48,8 +44,6 @@ extern struct spa_log_topic *log_topic;
 #define MASK_7_1	_M(FL)|_M(FR)|_M(FC)|_M(LFE)|_M(SL)|_M(SR)|_M(RL)|_M(RR)
 
 #define BUFFER_SIZE 4096
-
-#define BUFFER_SIZE 4096
 #define MAX_TAPS 255
 
 struct channelmix {
@@ -62,12 +56,13 @@ struct channelmix {
 #define CHANNELMIX_OPTION_NORMALIZE	(1<<1)		/**< normalize volumes */
 #define CHANNELMIX_OPTION_UPMIX		(1<<2)		/**< do simple upmixing */
 	uint32_t options;
-#define CHANNELMIX_UPMIX_NONE		(0)		/**< disable upmixing */
-#define CHANNELMIX_UPMIX_SIMPLE		(1)		/**< simple upmixing */
-#define CHANNELMIX_UPMIX_PSD		(2)		/**< Passive Surround Decoding upmixing */
+#define CHANNELMIX_UPMIX_NONE		0		/**< disable upmixing */
+#define CHANNELMIX_UPMIX_SIMPLE		1		/**< simple upmixing */
+#define CHANNELMIX_UPMIX_PSD		2		/**< Passive Surround Decoding upmixing */
 	uint32_t upmix;
 
 	struct spa_log *log;
+	const char *func_name;
 
 #define CHANNELMIX_FLAG_ZERO		(1<<0)		/**< all zero components */
 #define CHANNELMIX_FLAG_IDENTITY	(1<<1)		/**< identity matrix */
@@ -142,6 +137,7 @@ DEFINE_FUNCTION(f32_2_4, c);
 DEFINE_FUNCTION(f32_2_3p1, c);
 DEFINE_FUNCTION(f32_2_5p1, c);
 DEFINE_FUNCTION(f32_2_7p1, c);
+DEFINE_FUNCTION(f32_3p1_2, c);
 DEFINE_FUNCTION(f32_5p1_2, c);
 DEFINE_FUNCTION(f32_5p1_3p1, c);
 DEFINE_FUNCTION(f32_5p1_4, c);
@@ -151,9 +147,11 @@ DEFINE_FUNCTION(f32_7p1_4, c);
 
 #if defined (HAVE_SSE)
 DEFINE_FUNCTION(copy, sse);
-DEFINE_FUNCTION(f32_2_4, sse);
+DEFINE_FUNCTION(f32_3p1_2, sse);
 DEFINE_FUNCTION(f32_5p1_2, sse);
 DEFINE_FUNCTION(f32_5p1_3p1, sse);
 DEFINE_FUNCTION(f32_5p1_4, sse);
 DEFINE_FUNCTION(f32_7p1_4, sse);
 #endif
+
+#undef DEFINE_FUNCTION

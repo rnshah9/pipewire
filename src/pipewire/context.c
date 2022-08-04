@@ -543,6 +543,12 @@ struct pw_loop *pw_context_get_main_loop(struct pw_context *context)
 }
 
 SPA_EXPORT
+struct pw_data_loop *pw_context_get_data_loop(struct pw_context *context)
+{
+	return context->data_loop_impl;
+}
+
+SPA_EXPORT
 struct pw_work_queue *pw_context_get_work_queue(struct pw_context *context)
 {
 	return context->work_queue;
@@ -1113,7 +1119,7 @@ static bool rates_contains(uint32_t *rates, uint32_t n_rates, uint32_t rate)
  *    the desired final value and activate the followers and then the driver.
  *
  * A complete graph evaluation is performed for each change that is made to the
- * graph, such as making/destroting links, adding/removing nodes, property changes such
+ * graph, such as making/destroying links, adding/removing nodes, property changes such
  * as quantum/rate changes or metadata changes.
  */
 int pw_context_recalc_graph(struct pw_context *context, const char *reason)
@@ -1376,6 +1382,9 @@ again:
 			 * panding change. Apply the change to the position now so
 			 * that we have the right values when we change the node
 			 * states of the driver and followers to RUNNING below */
+			pw_log_debug("%p: apply duration:%"PRIu64" rate:%u/%u", context,
+					n->current_quantum, n->current_rate.num,
+					n->current_rate.denom);
 			n->rt.position->clock.duration = n->current_quantum;
 			n->rt.position->clock.rate = n->current_rate;
 			n->current_pending = false;

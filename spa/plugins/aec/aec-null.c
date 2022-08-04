@@ -58,19 +58,18 @@ static int null_run(void *object, const float *rec[], const float *play[], float
 	return 0;
 }
 
-static struct spa_audio_aec_methods impl_aec = {
+static const struct spa_audio_aec_methods impl_aec = {
+	SPA_VERSION_AUDIO_AEC,
 	.init = null_init,
 	.run = null_run,
 };
 
 static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
-	struct impl *impl;
-
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
 	spa_return_val_if_fail(interface != NULL, -EINVAL);
 
-	impl = (struct impl *) handle;
+	struct impl *impl = (struct impl *) handle;
 
 	if (spa_streq(type, SPA_TYPE_INTERFACE_AUDIO_AEC))
 		*interface = &impl->aec;
@@ -101,15 +100,13 @@ impl_init(const struct spa_handle_factory *factory,
 	  const struct spa_support *support,
 	  uint32_t n_support)
 {
-	struct impl *impl;
-
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
 
 	handle->get_interface = impl_get_interface;
 	handle->clear = impl_clear;
 
-	impl = (struct impl *) handle;
+	struct impl *impl = (struct impl *) handle;
 
 	impl->aec.iface = SPA_INTERFACE_INIT(
 		SPA_TYPE_INTERFACE_AUDIO_AEC,
@@ -119,7 +116,7 @@ impl_init(const struct spa_handle_factory *factory,
 	impl->aec.info = NULL;
 	impl->aec.latency = NULL;
 
-	impl->log = (struct spa_log*)spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	impl->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	spa_log_topic_init(impl->log, &log_topic);
 
 	spa_hook_list_init(&impl->hooks_list);
@@ -151,7 +148,7 @@ impl_enum_interface_info(const struct spa_handle_factory *factory,
 	return 1;
 }
 
-const struct spa_handle_factory spa_aec_null_factory = {
+static const struct spa_handle_factory spa_aec_null_factory = {
 	SPA_VERSION_HANDLE_FACTORY,
 	SPA_NAME_AEC,
 	NULL,
@@ -159,7 +156,6 @@ const struct spa_handle_factory spa_aec_null_factory = {
 	impl_init,
 	impl_enum_interface_info,
 };
-
 
 SPA_EXPORT
 int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t *index)

@@ -134,13 +134,13 @@ extern "C" {
 
 #define BLUEZ_ERROR_NOT_SUPPORTED "org.bluez.Error.NotSupported"
 
-#define SPA_BT_UUID_A2DP_SOURCE "0000110A-0000-1000-8000-00805F9B34FB"
-#define SPA_BT_UUID_A2DP_SINK   "0000110B-0000-1000-8000-00805F9B34FB"
-#define SPA_BT_UUID_HSP_HS      "00001108-0000-1000-8000-00805F9B34FB"
-#define SPA_BT_UUID_HSP_HS_ALT  "00001131-0000-1000-8000-00805F9B34FB"
-#define SPA_BT_UUID_HSP_AG      "00001112-0000-1000-8000-00805F9B34FB"
-#define SPA_BT_UUID_HFP_HF      "0000111E-0000-1000-8000-00805F9B34FB"
-#define SPA_BT_UUID_HFP_AG      "0000111F-0000-1000-8000-00805F9B34FB"
+#define SPA_BT_UUID_A2DP_SOURCE "0000110a-0000-1000-8000-00805f9b34fb"
+#define SPA_BT_UUID_A2DP_SINK   "0000110b-0000-1000-8000-00805f9b34fb"
+#define SPA_BT_UUID_HSP_HS      "00001108-0000-1000-8000-00805f9b34fb"
+#define SPA_BT_UUID_HSP_HS_ALT  "00001131-0000-1000-8000-00805f9b34fb"
+#define SPA_BT_UUID_HSP_AG      "00001112-0000-1000-8000-00805f9b34fb"
+#define SPA_BT_UUID_HFP_HF      "0000111e-0000-1000-8000-00805f9b34fb"
+#define SPA_BT_UUID_HFP_AG      "0000111f-0000-1000-8000-00805f9b34fb"
 
 #define PROFILE_HSP_AG	"/Profile/HSPAG"
 #define PROFILE_HSP_HS	"/Profile/HSPHS"
@@ -490,8 +490,8 @@ int spa_bt_device_add_profile(struct spa_bt_device *device, enum spa_bt_profile 
 int spa_bt_device_connect_profile(struct spa_bt_device *device, enum spa_bt_profile profile);
 int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force);
 int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec * const *codecs);
-bool spa_bt_device_supports_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec *codec);
-const struct a2dp_codec **spa_bt_device_get_supported_a2dp_codecs(struct spa_bt_device *device, size_t *count);
+bool spa_bt_device_supports_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec *codec, bool sink);
+const struct a2dp_codec **spa_bt_device_get_supported_a2dp_codecs(struct spa_bt_device *device, size_t *count, bool sink);
 int spa_bt_device_ensure_hfp_codec(struct spa_bt_device *device, unsigned int codec);
 int spa_bt_device_supports_hfp_codec(struct spa_bt_device *device, unsigned int codec);
 int spa_bt_device_release_transports(struct spa_bt_device *device);
@@ -574,6 +574,7 @@ struct spa_bt_transport {
 	unsigned int codec;
 	void *configuration;
 	int configuration_len;
+	char *endpoint_path;
 
 	uint32_t n_channels;
 	uint32_t channels[64];

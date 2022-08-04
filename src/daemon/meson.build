@@ -67,9 +67,11 @@ conf_files = [
  'pipewire.conf',
  'client.conf',
  'client-rt.conf',
+ 'filter-chain.conf',
  'jack.conf',
  'minimal.conf',
  'pipewire-pulse.conf',
+ 'pipewire-avb.conf',
 ]
 
 foreach c : conf_files
@@ -92,6 +94,14 @@ pipewire_exec = executable('pipewire',
 )
 
 executable('pipewire-pulse',
+  pipewire_daemon_sources,
+  install: true,
+  c_args : pipewire_c_args,
+  include_directories : [ configinc ],
+  dependencies : [ spa_dep, pipewire_dep, ],
+)
+
+executable('pipewire-avb',
   pipewire_daemon_sources,
   install: true,
   c_args : pipewire_c_args,

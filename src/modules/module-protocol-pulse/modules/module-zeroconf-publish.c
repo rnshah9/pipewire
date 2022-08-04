@@ -647,46 +647,24 @@ static const struct spa_dict_item module_zeroconf_publish_info[] = {
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
-struct module *create_module_zeroconf_publish(struct impl *impl, const char *argument)
+static int module_zeroconf_publish_prepare(struct module * const module)
 {
-	struct module *module;
-	struct module_zeroconf_publish_data *d;
-	struct pw_properties *props = NULL;
-	int res;
-
 	PW_LOG_TOPIC_INIT(mod_topic);
 
-	props = pw_properties_new_dict(&SPA_DICT_INIT_ARRAY(module_zeroconf_publish_info));
-	if (!props) {
-		res = -errno;
-		goto out;
-	}
-	if (argument)
-		module_args_add_props(props, argument);
+	struct module_zeroconf_publish_data * const data = module->user_data;
+	data->module = module;
+	data->port = pw_properties_get_uint32(module->props, "port", PW_PROTOCOL_PULSE_DEFAULT_PORT);
+	spa_list_init(&data->pending);
+	spa_list_init(&data->published);
 
-	module = module_new(impl, sizeof(*d));
-	if (module == NULL) {
-		res = -errno;
-		goto out;
-	}
-
-	module->props = props;
-	d = module->user_data;
-	d->module = module;
-	d->port = pw_properties_get_uint32(props, "port", PW_PROTOCOL_PULSE_DEFAULT_PORT);
-	spa_list_init(&d->pending);
-	spa_list_init(&d->published);
-
-	return module;
-out:
-	pw_properties_free(props);
-	errno = -res;
-	return NULL;
+	return 0;
 }
 
 DEFINE_MODULE_INFO(module_zeroconf_publish) = {
 	.name = "module-zeroconf-publish",
-	.create = create_module_zeroconf_publish,
+	.prepare = module_zeroconf_publish_prepare,
 	.load = module_zeroconf_publish_load,
 	.unload = module_zeroconf_publish_unload,
+	.properties = &SPA_DICT_INIT_ARRAY(module_zeroconf_publish_info),
+	.data_size = sizeof(struct module_zeroconf_publish_data),
 };

@@ -313,7 +313,7 @@ static int update_params(struct stream *impl, uint32_t id,
 }
 
 
-static inline int push_queue(struct stream *stream, struct queue *queue, struct buffer *buffer)
+static inline int queue_push(struct stream *stream, struct queue *queue, struct buffer *buffer)
 {
 	uint32_t index;
 
@@ -330,7 +330,13 @@ static inline int push_queue(struct stream *stream, struct queue *queue, struct 
 	return 0;
 }
 
-static inline struct buffer *pop_queue(struct stream *stream, struct queue *queue)
+static inline bool queue_is_empty(struct stream *stream, struct queue *queue)
+{
+	uint32_t index;
+	return spa_ringbuffer_get_read_index(&queue->ring, &index) < 1;
+}
+
+static inline struct buffer *queue_pop(struct stream *stream, struct queue *queue)
 {
 	uint32_t index, id;
 	struct buffer *buffer;
@@ -568,7 +574,7 @@ static inline uint32_t update_requested(struct stream *impl)
 		buffer->this.requested = impl->quantum;
 		res = 1;
 	}
-	pw_log_trace_fp("%p: update buffer:%u size:%u", impl, id, r->size);
+	pw_log_trace_fp("%p: update buffer:%u size:%"PRIu64, impl, id, buffer->this.requested);
 	return res;
 }
 
@@ -788,7 +794,7 @@ static void clear_buffers(struct pw_stream *stream)
 	if (impl->direction == SPA_DIRECTION_INPUT) {
 		struct buffer *b;
 
-		while ((b = pop_queue(impl, &impl->dequeued))) {
+		while ((b = queue_pop(impl, &impl->dequeued))) {
 			if (b->busy)
 				ATOMIC_DEC(b->busy->count);
 		}
@@ -927,7 +933,7 @@ static int impl_port_use_buffers(void *object,
 
 		if (impl->direction == SPA_DIRECTION_OUTPUT) {
 			pw_log_trace("%p: recycle buffer %d", stream, b->id);
-			push_queue(impl, &impl->dequeued, b);
+			queue_push(impl, &impl->dequeued, b);
 		}
 
 		SPA_FLAG_SET(b->flags, BUFFER_FLAG_ADDED);
@@ -945,7 +951,7 @@ static int impl_port_reuse_buffer(void *object, uint32_t port_id, uint32_t buffe
 	struct stream *d = object;
 	pw_log_trace("%p: recycle buffer %d", d, buffer_id);
 	if (buffer_id < d->n_buffers)
-		push_queue(d, &d->queued, &d->buffers[buffer_id]);
+		queue_push(d, &d->queued, &d->buffers[buffer_id]);
 	return 0;
 }
 
@@ -984,7 +990,7 @@ static int impl_node_process_input(void *object)
 	if (io->status == SPA_STATUS_HAVE_DATA &&
 	    (b = get_buffer(stream, io->buffer_id)) != NULL) {
 		/* push new buffer */
-		if (push_queue(impl, &impl->dequeued, b) == 0) {
+		if (queue_push(impl, &impl->dequeued, b) == 0) {
 			copy_position(impl, impl->dequeued.incount);
 			if (b->busy)
 				ATOMIC_INC(b->busy->count);
@@ -993,7 +999,7 @@ static int impl_node_process_input(void *object)
 	}
 	if (io->status != SPA_STATUS_NEED_DATA) {
 		/* pop buffer to recycle */
-		if ((b = pop_queue(impl, &impl->queued))) {
+		if ((b = queue_pop(impl, &impl->queued))) {
 			pw_log_trace_fp("%p: recycle buffer %d", stream, b->id);
 		} else if (io->status == -EPIPE)
 			return io->status;
@@ -1013,28 +1019,36 @@ static int impl_node_process_output(void *object)
 	struct spa_io_buffers *io = impl->io;
 	struct buffer *b;
 	int res;
-	uint32_t index;
-	bool recycled;
+	bool ask_more;
 
 again:
 	pw_log_trace_fp("%p: process out status:%d id:%d", stream,
 			io->status, io->buffer_id);
 
-	recycled = false;
+	ask_more = false;
 	if ((res = io->status) != SPA_STATUS_HAVE_DATA) {
 		/* recycle old buffer */
 		if ((b = get_buffer(stream, io->buffer_id)) != NULL) {
 			pw_log_trace_fp("%p: recycle buffer %d", stream, b->id);
-			push_queue(impl, &impl->dequeued, b);
-			recycled = true;
+			queue_push(impl, &impl->dequeued, b);
 		}
 
 		/* pop new buffer */
-		if ((b = pop_queue(impl, &impl->queued)) != NULL) {
+		if ((b = queue_pop(impl, &impl->queued)) != NULL) {
 			impl->drained = false;
 			io->buffer_id = b->id;
 			res = io->status = SPA_STATUS_HAVE_DATA;
 			pw_log_trace_fp("%p: pop %d %p", stream, b->id, io);
+			/* we have a buffer, if we are not rt and don't follow
+			 * any rate matching and there are no more
+			 * buffers queued and there is a buffer to dequeue, ask for
+			 * more buffers so that we have one in the next round.
+			 * If we are using rate matching we need to wait until the
+			 * rate matching node (audioconvert) has been scheduled to
+			 * update the values. */
+			ask_more = !impl->process_rt && impl->rate_match == NULL &&
+				queue_is_empty(impl, &impl->queued) &&
+				!queue_is_empty(impl, &impl->dequeued);
 		} else if (impl->draining || impl->drained) {
 			impl->draining = true;
 			impl->drained = true;
@@ -1045,7 +1059,12 @@ again:
 			io->buffer_id = SPA_ID_INVALID;
 			res = io->status = SPA_STATUS_NEED_DATA;
 			pw_log_trace_fp("%p: no more buffers %p", stream, io);
+			ask_more = true;
 		}
+	} else {
+		ask_more = !impl->process_rt &&
+			queue_is_empty(impl, &impl->queued) &&
+			!queue_is_empty(impl, &impl->dequeued);
 	}
 
 	copy_position(impl, impl->queued.outcount);
@@ -1053,18 +1072,13 @@ again:
 	if (!impl->draining && !impl->driving) {
 		/* we're not draining, not a driver check if we need to get
 		 * more buffers */
-		if (!impl->process_rt && (recycled || res == SPA_STATUS_NEED_DATA)) {
-			/* not realtime and we have a free buffer, trigger process so that we have
-			 * data in the next round. */
+		if (ask_more) {
 			if (update_requested(impl) > 0)
 				call_process(impl);
-		} else if (res == SPA_STATUS_NEED_DATA) {
-			/* realtime and we don't have a buffer, trigger process and try
-			 * again when there is something in the queue now */
-			if (update_requested(impl) > 0)
-				call_process(impl);
-			if (impl->draining ||
-			    spa_ringbuffer_get_read_index(&impl->queued.ring, &index) > 0)
+			/* realtime, we can try again now if there is something.
+			 * non-realtime, we will have to try in the next round */
+			if (impl->process_rt &&
+			    (impl->draining || !queue_is_empty(impl, &impl->queued)))
 				goto again;
 		}
 	}
@@ -1155,7 +1169,7 @@ static int node_event_param(void *object, int seq,
 		struct control *c;
 		const struct spa_pod *type, *pod;
 		uint32_t iid, choice, n_vals, container = SPA_ID_INVALID;
-		float *vals, bool_range[3] = { 1.0, 0.0, 1.0 }, dbl[3];
+		float *vals, bool_range[3] = { 1.0f, 0.0f, 1.0f }, dbl[3];
 
 		if (spa_pod_parse_object(param,
 					SPA_TYPE_OBJECT_PropInfo, NULL,
@@ -1182,8 +1196,6 @@ static int node_event_param(void *object, int seq,
 			return -EINVAL;
 		}
 
-		spa_list_append(&stream->controls, &c->link);
-
 		pod = spa_pod_get_values(type, &n_vals, &choice);
 
 		c->type = SPA_POD_TYPE(pod);
@@ -1204,22 +1216,28 @@ static int node_event_param(void *object, int seq,
 			vals[0] = SPA_POD_VALUE(struct spa_pod_bool, pod);
 			n_vals = 3;
 		}
-		else
+		else {
+			free(c);
 			return -ENOTSUP;
+		}
 
 		c->container = container != SPA_ID_INVALID ? container : c->type;
 
 		switch (choice) {
 		case SPA_CHOICE_None:
-			if (n_vals < 1)
+			if (n_vals < 1) {
+				free(c);
 				return -EINVAL;
+			}
 			c->control.n_values = 1;
 			c->control.max_values = 1;
 			c->control.values[0] = c->control.def = c->control.min = c->control.max = vals[0];
 			break;
 		case SPA_CHOICE_Range:
-			if (n_vals < 3)
+			if (n_vals < 3) {
+				free(c);
 				return -EINVAL;
+			}
 			c->control.n_values = 1;
 			c->control.max_values = 1;
 			c->control.values[0] = vals[0];
@@ -1228,10 +1246,12 @@ static int node_event_param(void *object, int seq,
 			c->control.max = vals[2];
 			break;
 		default:
+			free(c);
 			return -ENOTSUP;
 		}
 
 		c->id = iid;
+		spa_list_append(&stream->controls, &c->link);
 		pw_log_debug("%p: add control %d (%s) container:%d (def:%f min:%f max:%f)",
 				stream, c->id, c->control.name, c->container,
 				c->control.def, c->control.min, c->control.max);
@@ -1241,11 +1261,9 @@ static int node_event_param(void *object, int seq,
 	{
 		struct spa_pod_prop *prop;
 		struct spa_pod_object *obj = (struct spa_pod_object *) param;
-		union {
-			float f;
-			double d;
-			bool b;
-		} value;
+		float value_f;
+		double value_d;
+		bool value_b;
 		float *values;
 		uint32_t i, n_values;
 
@@ -1258,24 +1276,24 @@ static int node_event_param(void *object, int seq,
 
 			switch (c->container) {
 			case SPA_TYPE_Float:
-				if (spa_pod_get_float(&prop->value, &value.f) < 0)
+				if (spa_pod_get_float(&prop->value, &value_f) < 0)
 					continue;
 				n_values = 1;
-				values = &value.f;
+				values = &value_f;
 				break;
 			case SPA_TYPE_Double:
-				if (spa_pod_get_double(&prop->value, &value.d) < 0)
+				if (spa_pod_get_double(&prop->value, &value_d) < 0)
 					continue;
 				n_values = 1;
-				value.f = value.d;
-				values = &value.f;
+				value_f = value_d;
+				values = &value_f;
 				break;
 			case SPA_TYPE_Bool:
-				if (spa_pod_get_bool(&prop->value, &value.b) < 0)
+				if (spa_pod_get_bool(&prop->value, &value_b) < 0)
 					continue;
-				value.f = value.b ? 1.0 : 0.0;
+				value_f = value_b ? 1.0f : 0.0f;
 				n_values = 1;
-				values = &value.f;
+				values = &value_f;
 				break;
 			case SPA_TYPE_Array:
 				if ((values = spa_pod_get_array(&prop->value, &n_values)) == NULL ||
@@ -2223,7 +2241,7 @@ struct pw_buffer *pw_stream_dequeue_buffer(struct pw_stream *stream)
 	struct buffer *b;
 	int res;
 
-	if ((b = pop_queue(impl, &impl->dequeued)) == NULL) {
+	if ((b = queue_pop(impl, &impl->dequeued)) == NULL) {
 		res = -errno;
 		pw_log_trace_fp("%p: no more buffers: %m", stream);
 		errno = -res;
@@ -2234,7 +2252,7 @@ struct pw_buffer *pw_stream_dequeue_buffer(struct pw_stream *stream)
 	if (b->busy && impl->direction == SPA_DIRECTION_OUTPUT) {
 		if (ATOMIC_INC(b->busy->count) > 1) {
 			ATOMIC_DEC(b->busy->count);
-			push_queue(impl, &impl->dequeued, b);
+			queue_push(impl, &impl->dequeued, b);
 			pw_log_trace_fp("%p: buffer busy", stream);
 			errno = EBUSY;
 			return NULL;
@@ -2254,7 +2272,7 @@ int pw_stream_queue_buffer(struct pw_stream *stream, struct pw_buffer *buffer)
 		ATOMIC_DEC(b->busy->count);
 
 	pw_log_trace_fp("%p: queue buffer %d", stream, b->id);
-	if ((res = push_queue(impl, &impl->queued, b)) < 0)
+	if ((res = queue_push(impl, &impl->queued, b)) < 0)
 		return res;
 
 	if (impl->direction == SPA_DIRECTION_OUTPUT &&
@@ -2275,9 +2293,9 @@ do_flush(struct spa_loop *loop,
 
 	pw_log_trace_fp("%p: flush", impl);
 	do {
-		b = pop_queue(impl, &impl->queued);
+		b = queue_pop(impl, &impl->queued);
 		if (b != NULL)
-			push_queue(impl, &impl->dequeued, b);
+			queue_push(impl, &impl->dequeued, b);
 	}
 	while (b);
 

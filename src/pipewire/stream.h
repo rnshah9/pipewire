@@ -50,6 +50,14 @@ extern "C" {
  * inputs and/or outputs you will need to use the pw_filter or make
  * a pw_node yourself and export it with \ref pw_core_export.
  *
+ * Streams can also be used to:
+ *
+ * \li Implement a Sink in PipeWire. This is a PW_DIRECTION_INPUT stream.
+ * \li Implement a Source in PipeWire. This is a PW_DIRECTION_OUTPUT stream
+ *
+ * In this case, the PW_KEY_MEDIA_CLASS property needs to be set to
+ * "Audio/Sink" or "Audio/Source" respectively.
+ *
  * \section sec_create Create
  *
  * Make a new stream with \ref pw_stream_new(). You will need to specify
@@ -63,6 +71,16 @@ extern "C" {
  *
  * The stream is initially unconnected. To connect the stream, use
  * \ref pw_stream_connect(). Pass the desired direction as an argument.
+ *
+ * The direction is:
+
+ * \li PW_DIRECTION_INPUT for a stream that *consumes* data. This can be a
+ * stream that captures from a Source or a when the stream is used to
+ * implement a Sink.
+ *
+ * \li PW_DIRECTION_OUTPUT for a stream that *produces* data. This can be a
+ * stream that plays to a Sink or when the stream is used to implement
+ * a Source.
  *
  * \subsection ssec_stream_target Stream target
  *
@@ -143,6 +161,15 @@ extern "C" {
  * \section sec_stream_disconnect Disconnect
  *
  * Use \ref pw_stream_disconnect() to disconnect a stream after use.
+ *
+ * \section sec_stream_configuration Configuration
+ *
+ * \subsection ssec_config_properties Stream Properties
+ *
+ * \subsection ssec_config_rules Stream Rules
+ *
+ * \section sec_stream_environment Environment Variables
+ *
  */
 /** \defgroup pw_stream Stream
  *
@@ -409,9 +436,16 @@ int pw_stream_update_properties(struct pw_stream *stream, const struct spa_dict 
 int
 pw_stream_connect(struct pw_stream *stream,		/**< a \ref pw_stream */
 		  enum pw_direction direction,		/**< the stream direction */
-		  uint32_t target_id,			/**< the target object id to connect to or
-							  *  PW_ID_ANY to let the manager
-							  *  select a target. */
+		  uint32_t target_id,			/**< should have the value PW_ID_ANY.
+							  * To select a specific target
+							  * node, specify the
+							  * PW_KEY_OBJECT_SERIAL or the
+							  * PW_KEY_NODE_NAME value of the target
+							  * node in the PW_KEY_TARGET_OBJECT
+							  * property of the stream.
+							  * Specifying target nodes by
+							  * their id is deprecated.
+							  */
 		  enum pw_stream_flags flags,		/**< stream flags */
 		  const struct spa_pod **params,	/**< an array with params. The params
 							  *  should ideally contain supported

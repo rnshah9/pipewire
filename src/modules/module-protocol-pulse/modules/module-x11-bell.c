@@ -100,6 +100,16 @@ static int module_x11_bell_unload(struct module *module)
 	return 0;
 }
 
+static int module_x11_bell_prepare(struct module * const module)
+{
+	PW_LOG_TOPIC_INIT(mod_topic);
+
+	struct module_x11_bell_data * const data = module->user_data;
+	data->module = module;
+
+	return 0;
+}
+
 static const struct spa_dict_item module_x11_bell_info[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
 	{ PW_KEY_MODULE_DESCRIPTION, "X11 bell interceptor" },
@@ -110,43 +120,11 @@ static const struct spa_dict_item module_x11_bell_info[] = {
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
-struct module *create_module_x11_bell(struct impl *impl, const char *argument)
-{
-	struct pw_properties *props = NULL;
-	struct module_x11_bell_data *data;
-	struct module *module;
-	int res;
-
-	PW_LOG_TOPIC_INIT(mod_topic);
-
-	props = pw_properties_new_dict(&SPA_DICT_INIT_ARRAY(module_x11_bell_info));
-	if (props == NULL) {
-		res = -EINVAL;
-		goto out;
-	}
-	if (argument)
-		module_args_add_props(props, argument);
-
-	module = module_new(impl, sizeof(struct module_x11_bell_data));
-	if (module == NULL) {
-		res = -errno;
-		goto out;
-	}
-	module->props = props;
-
-	data = module->user_data;
-	data->module = module;
-
-	return module;
-out:
-	pw_properties_free(props);
-	errno = -res;
-	return NULL;
-}
-
 DEFINE_MODULE_INFO(module_x11_bell) = {
 	.name = "module-x11-bell",
-	.create = create_module_x11_bell,
+	.prepare = module_x11_bell_prepare,
 	.load = module_x11_bell_load,
 	.unload = module_x11_bell_unload,
+	.properties = &SPA_DICT_INIT_ARRAY(module_x11_bell_info),
+	.data_size = sizeof(struct module_x11_bell_data),
 };

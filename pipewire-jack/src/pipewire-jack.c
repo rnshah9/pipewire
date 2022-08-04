@@ -67,7 +67,7 @@
 #define JACK_PORT_TYPE_SIZE             32
 #define MONITOR_EXT			" Monitor"
 
-#define MAX_MIDI_MIX			1024
+#define MAX_MIX				1024
 #define MAX_BUFFER_FRAMES		8192
 
 #define MAX_ALIGN			16
@@ -106,9 +106,9 @@ static bool mlock_warned = false;
 #define OBJECT_CHUNK		8
 #define RECYCLE_THRESHOLD	128
 
-typedef void (*mix2_func) (float *dst, float *src1, float *src2, int n_samples);
+typedef void (*mix_func) (float *dst, float *src[], uint32_t n_src, bool aligned, uint32_t n_samples);
 
-static mix2_func mix2;
+static mix_func mix_function;
 
 struct object {
 	struct spa_list link;
@@ -400,6 +400,7 @@ struct client {
 	unsigned int default_as_system:1;
 	int self_connect_mode;
 	int rt_max;
+	unsigned int fix_midi_events:1;
 
 	jack_position_t jack_position;
 	jack_transport_state_t jack_state;
@@ -735,38 +736,40 @@ static struct buffer *dequeue_buffer(struct client *c, struct mix *mix)
 
 #if defined (__SSE__)
 #include <xmmintrin.h>
-static void mix2_sse(float *dst, float *src1, float *src2, int n_samples)
+static void mix_sse(float *dst, float *src[], uint32_t n_src, bool aligned, uint32_t n_samples)
 {
-	int n, unrolled;
-	__m128 in[2];
+	uint32_t i, n, unrolled;
+	__m128 in[1];
 
-	if (SPA_IS_ALIGNED(src1, 16) &&
-	    SPA_IS_ALIGNED(src2, 16) &&
-	    SPA_IS_ALIGNED(dst, 16))
-		unrolled = n_samples / 4;
+	if (SPA_IS_ALIGNED(dst, 16) && aligned)
+		unrolled = n_samples & ~3;
 	else
 		unrolled = 0;
 
-	for (n = 0; unrolled--; n += 4) {
-		in[0] = _mm_load_ps(&src1[n]),
-		in[1] = _mm_load_ps(&src2[n]),
-		in[0] = _mm_add_ps(in[0], in[1]);
+	for (n = 0; n < unrolled; n += 4) {
+		in[0] = _mm_load_ps(&src[0][n]);
+		for (i = 1; i < n_src; i++)
+			in[0] = _mm_add_ps(in[0], _mm_load_ps(&src[i][n]));
 		_mm_store_ps(&dst[n], in[0]);
 	}
 	for (; n < n_samples; n++) {
-		in[0] = _mm_load_ss(&src1[n]),
-		in[1] = _mm_load_ss(&src2[n]),
-		in[0] = _mm_add_ss(in[0], in[1]);
+		in[0] = _mm_load_ss(&src[0][n]);
+		for (i = 1; i < n_src; i++)
+			in[0] = _mm_add_ss(in[0], _mm_load_ss(&src[i][n]));
 		_mm_store_ss(&dst[n], in[0]);
 	}
 }
 #endif
 
-static void mix2_c(float *dst, float *src1, float *src2, int n_samples)
+static void mix_c(float *dst, float *src[], uint32_t n_src, bool aligned, uint32_t n_samples)
 {
-	int i;
-	for (i = 0; i < n_samples; i++)
-		dst[i] = src1[i] + src2[i];
+	uint32_t n, i;
+	for (n = 0; n < n_samples; n++)  {
+		float t = src[0][n];
+		for (i = 1; i < n_src; i++)
+			t += src[i][n];
+		dst[n] = t;
+	}
 }
 
 SPA_EXPORT
@@ -985,10 +988,20 @@ static size_t convert_from_midi(void *midi, void *buffer, size_t size)
 	return b.state.offset;
 }
 
-static void convert_to_midi(struct spa_pod_sequence **seq, uint32_t n_seq, void *midi)
+static inline void fix_midi_event(uint8_t *data, size_t size)
+{
+	/* fixup NoteOn with vel 0 */
+	if (size > 2 && (data[0] & 0xF0) == 0x90 && data[2] == 0x00) {
+		data[0] = 0x80 + (data[0] & 0x0F);
+		data[2] = 0x40;
+	}
+}
+
+static void convert_to_midi(struct spa_pod_sequence **seq, uint32_t n_seq, void *midi, bool fix)
 {
 	struct spa_pod_control *c[n_seq];
 	uint32_t i;
+	int res;
 
 	for (i = 0; i < n_seq; i++)
 		c[i] = spa_pod_control_first(&seq[i]->body);
@@ -996,6 +1009,8 @@ static void convert_to_midi(struct spa_pod_sequence **seq, uint32_t n_seq, void 
 	while (true) {
 		struct spa_pod_control *next = NULL;
 		uint32_t next_index = 0;
+		uint8_t *data;
+		size_t size;
 
 		for (i = 0; i < n_seq; i++) {
 			if (!spa_pod_control_is_inside(&seq[i]->body,
@@ -1010,12 +1025,17 @@ static void convert_to_midi(struct spa_pod_sequence **seq, uint32_t n_seq, void 
 		if (SPA_UNLIKELY(next == NULL))
 			break;
 
+		data = SPA_POD_BODY(&next->value);
+		size = SPA_POD_BODY_SIZE(&next->value);
+
 		switch(next->type) {
 		case SPA_CONTROL_Midi:
-			jack_midi_event_write(midi,
-					next->offset,
-					SPA_POD_BODY(&next->value),
-					SPA_POD_BODY_SIZE(&next->value));
+			if (fix)
+				fix_midi_event(data, size);
+
+			if ((res = jack_midi_event_write(midi, next->offset, data, size)) < 0)
+				pw_log_warn("midi %p: can't write event: %s", midi,
+						spa_strerror(res));
 			break;
 		}
 		c[next_index] = spa_pod_control_next(c[next_index]);
@@ -3205,6 +3225,30 @@ jack_client_t * jack_client_open (const char *client_name,
 	varargs_parse(client, options, ap);
 	va_end(ap);
 
+	snprintf(client->name, sizeof(client->name), "pw-%s", client_name);
+
+	pthread_mutex_init(&client->context.lock, NULL);
+	spa_list_init(&client->context.objects);
+
+	client->node_id = SPA_ID_INVALID;
+
+	client->buffer_frames = (uint32_t)-1;
+	client->sample_rate = (uint32_t)-1;
+	client->latency = SPA_FRACTION(-1, -1);
+
+	spa_list_init(&client->mix);
+	spa_list_init(&client->free_mix);
+
+	spa_list_init(&client->free_ports);
+	pw_map_init(&client->ports[SPA_DIRECTION_INPUT], 32, 32);
+	pw_map_init(&client->ports[SPA_DIRECTION_OUTPUT], 32, 32);
+
+	spa_list_init(&client->links);
+	client->driver_id = SPA_ID_INVALID;
+
+	spa_list_init(&client->rt.target_links);
+	pthread_mutex_init(&client->rt_lock, NULL);
+
 	if (client->server_name != NULL &&
 	    spa_streq(client->server_name, "default"))
 		client->server_name = NULL;
@@ -3219,8 +3263,6 @@ jack_client_t * jack_client_open (const char *client_name,
 	if (client->props == NULL)
 		goto no_props;
 
-	client->node_id = SPA_ID_INVALID;
-	snprintf(client->name, sizeof(client->name), "pw-%s", client_name);
 	client->context.loop = pw_thread_loop_new(client->name, NULL);
 	client->context.l = pw_thread_loop_get_loop(client->context.loop);
 	client->context.context = pw_context_new(
@@ -3239,19 +3281,15 @@ jack_client_t * jack_client_open (const char *client_name,
 	pw_context_conf_section_match_rules(client->context.context, "jack.rules",
 			&client->props->dict, execute_match, client);
 
-	pthread_mutex_init(&client->context.lock, NULL);
-	pthread_mutex_init(&client->rt_lock, NULL);
-	spa_list_init(&client->context.objects);
-
 	support = pw_context_get_support(client->context.context, &n_support);
 
-	mix2 = mix2_c;
+	mix_function = mix_c;
 	cpu_iface = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_CPU);
 	if (cpu_iface) {
 #if defined (__SSE__)
 		uint32_t flags = spa_cpu_get_flags(cpu_iface);
 		if (flags & SPA_CPU_FLAG_SSE)
-			mix2 = mix2_sse;
+			mix_function = mix_sse;
 #endif
 	}
 	client->context.old_thread_utils =
@@ -3271,20 +3309,6 @@ jack_client_t * jack_client_open (const char *client_name,
 	pw_context_set_object(client->context.context,
 			SPA_TYPE_INTERFACE_ThreadUtils,
 			&client->context.thread_utils);
-
-	spa_list_init(&client->links);
-	spa_list_init(&client->rt.target_links);
-
-	client->buffer_frames = (uint32_t)-1;
-	client->sample_rate = (uint32_t)-1;
-	client->latency = SPA_FRACTION(-1, -1);
-
-        spa_list_init(&client->mix);
-        spa_list_init(&client->free_mix);
-
-	pw_map_init(&client->ports[SPA_DIRECTION_INPUT], 32, 32);
-	pw_map_init(&client->ports[SPA_DIRECTION_OUTPUT], 32, 32);
-	spa_list_init(&client->free_ports);
 
 	pw_thread_loop_start(client->context.loop);
 
@@ -3355,26 +3379,6 @@ jack_client_t * jack_client_open (const char *client_name,
 	if (client->node == NULL)
 		goto init_failed;
 
-	client->show_monitor = pw_properties_get_bool(client->props, "jack.show-monitor", true);
-	client->merge_monitor = pw_properties_get_bool(client->props, "jack.merge-monitor", false);
-	client->short_name = pw_properties_get_bool(client->props, "jack.short-name", false);
-	client->filter_name = pw_properties_get_bool(client->props, "jack.filter-name", false);
-	client->locked_process = pw_properties_get_bool(client->props, "jack.locked-process", true);
-	client->default_as_system = pw_properties_get_bool(client->props, "jack.default-as-system", false);
-
-	client->self_connect_mode = SELF_CONNECT_ALLOW;
-	if ((str = pw_properties_get(client->props, "jack.self-connect-mode")) != NULL) {
-		if (spa_streq(str, "fail-external"))
-			client->self_connect_mode = SELF_CONNECT_FAIL_EXT;
-		else if (spa_streq(str, "ignore-external"))
-			client->self_connect_mode = SELF_CONNECT_IGNORE_EXT;
-		else if (spa_streq(str, "fail-all"))
-			client->self_connect_mode = SELF_CONNECT_FAIL_ALL;
-		else if (spa_streq(str, "ignore-all"))
-			client->self_connect_mode = SELF_CONNECT_IGNORE_ALL;
-	}
-	client->rt_max = pw_properties_get_int32(client->props, "rt.prio", DEFAULT_RT_MAX);
-
 	pw_client_node_add_listener(client->node,
 			&client->node_listener, &client_node_events, client);
         pw_proxy_add_listener((struct pw_proxy*)client->node,
@@ -3392,6 +3396,27 @@ jack_client_t * jack_client_open (const char *client_name,
 			PW_CLIENT_NODE_UPDATE_INFO,
 			0, NULL, &client->info);
 	client->info.change_mask = 0;
+
+	client->show_monitor = pw_properties_get_bool(client->props, "jack.show-monitor", true);
+	client->merge_monitor = pw_properties_get_bool(client->props, "jack.merge-monitor", false);
+	client->short_name = pw_properties_get_bool(client->props, "jack.short-name", false);
+	client->filter_name = pw_properties_get_bool(client->props, "jack.filter-name", false);
+	client->locked_process = pw_properties_get_bool(client->props, "jack.locked-process", true);
+	client->default_as_system = pw_properties_get_bool(client->props, "jack.default-as-system", false);
+	client->fix_midi_events = pw_properties_get_bool(client->props, "jack.fix-midi-events", true);
+
+	client->self_connect_mode = SELF_CONNECT_ALLOW;
+	if ((str = pw_properties_get(client->props, "jack.self-connect-mode")) != NULL) {
+		if (spa_streq(str, "fail-external"))
+			client->self_connect_mode = SELF_CONNECT_FAIL_EXT;
+		else if (spa_streq(str, "ignore-external"))
+			client->self_connect_mode = SELF_CONNECT_IGNORE_EXT;
+		else if (spa_streq(str, "fail-all"))
+			client->self_connect_mode = SELF_CONNECT_FAIL_ALL;
+		else if (spa_streq(str, "ignore-all"))
+			client->self_connect_mode = SELF_CONNECT_IGNORE_ALL;
+	}
+	client->rt_max = pw_properties_get_int32(client->props, "rt.prio", DEFAULT_RT_MAX);
 
 	if (status)
 		*status = 0;
@@ -3432,7 +3457,7 @@ server_failed:
 exit_unlock:
 	pw_thread_loop_unlock(client->context.loop);
 exit:
-	free(client);
+	jack_client_close((jack_client_t *) client);
 	return NULL;
 disabled:
 	if (status)
@@ -3467,20 +3492,29 @@ int jack_client_close (jack_client_t *client)
 
 	res = jack_deactivate(client);
 
-	pw_thread_loop_stop(c->context.loop);
+	if (c->context.loop)
+		pw_thread_loop_stop(c->context.loop);
 
 	if (c->registry) {
 		spa_hook_remove(&c->registry_listener);
 		pw_proxy_destroy((struct pw_proxy*)c->registry);
 	}
 	if (c->metadata && c->metadata->proxy) {
+		spa_hook_remove(&c->metadata->listener);
+		spa_hook_remove(&c->metadata->proxy_listener);
 		pw_proxy_destroy((struct pw_proxy*)c->metadata->proxy);
 	}
-	spa_hook_remove(&c->core_listener);
-	pw_core_disconnect(c->core);
-	pw_context_destroy(c->context.context);
 
-	pw_thread_loop_destroy(c->context.loop);
+	if (c->core) {
+		spa_hook_remove(&c->core_listener);
+		pw_core_disconnect(c->core);
+	}
+
+	if (c->context.context)
+		pw_context_destroy(c->context.context);
+
+	if (c->context.loop)
+		pw_thread_loop_destroy(c->context.loop);
 
 	pw_log_debug("%p: free", client);
 
@@ -4384,13 +4418,14 @@ static void *get_buffer_input_float(struct port *p, jack_nframes_t frames)
 {
 	struct mix *mix;
 	struct buffer *b;
-	int layer = 0;
 	void *ptr = NULL;
+	float *mix_ptr[MAX_MIX], *np;
+	uint32_t n_ptr = 0;
+	bool ptr_aligned = true;
 
 	spa_list_for_each(mix, &p->mix, port_link) {
 		struct spa_data *d;
 		uint32_t offset, size;
-		void *np;
 
 		pw_log_trace_fp("%p: port %s mix %d.%d get buffer %d",
 				p->client, p->object->port.name, p->port_id, mix->id, frames);
@@ -4404,14 +4439,20 @@ static void *get_buffer_input_float(struct port *p, jack_nframes_t frames)
 		if (size / sizeof(float) < frames)
 			continue;
 
-		np = SPA_PTROFF(d->data, offset, void);
-		if (layer++ == 0) {
-			ptr = np;
-		} else {
-			mix2(p->emptyptr, ptr, np, frames);
-			ptr = p->emptyptr;
-			p->zeroed = false;
-		}
+		np = SPA_PTROFF(d->data, offset, float);
+		if (!SPA_IS_ALIGNED(np, 16))
+			ptr_aligned = false;
+
+		mix_ptr[n_ptr++] = np;
+		if (n_ptr == MAX_MIX)
+			break;
+	}
+	if (n_ptr == 1) {
+		ptr = mix_ptr[0];
+	} else if (n_ptr > 1) {
+		ptr = p->emptyptr;
+		mix_function(ptr, mix_ptr, n_ptr, ptr_aligned, frames);
+		p->zeroed = false;
 	}
 	if (ptr == NULL)
 		ptr = init_buffer(p);
@@ -4422,7 +4463,7 @@ static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames)
 {
 	struct mix *mix;
 	void *ptr = p->emptyptr;
-	struct spa_pod_sequence *seq[MAX_MIDI_MIX];
+	struct spa_pod_sequence *seq[MAX_MIX];
 	uint32_t n_seq = 0;
 
 	jack_midi_clear_buffer(ptr);
@@ -4446,10 +4487,10 @@ static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames)
 			continue;
 
 		seq[n_seq++] = pod;
-		if (n_seq == MAX_MIDI_MIX)
+		if (n_seq == MAX_MIX)
 			break;
 	}
-	convert_to_midi(seq, n_seq, ptr);
+	convert_to_midi(seq, n_seq, ptr, p->client->fix_midi_events);
 
 	return ptr;
 }

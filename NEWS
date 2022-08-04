@@ -1,3 +1,352 @@
+# PipeWire 0.3.56 (2022-07-19)
+
+This is a quick bugfix release that is API and ABI compatible with previous
+0.3.x releases.
+
+## Highlights
+  - A critical bug that could crash JACK apps was fixed.
+  - Some more regressions in audiomixer were fixed. This should fix crackling
+    and stuttering in some cases as well as some channel mapping regressions.
+  - A bug in the alsa plugin was fixed that could cause stuttering in VMs.
+  - Bluetooth sources should have improved latency and rate control.
+  - Many more bugfixes and improvements.
+
+
+## Modules
+  - An experimental AVB module was added. It can expose PipeWire as an AVB
+    entity and initiate (broken) streaming between entities.
+  - module-loopback now handles the cases where the input and output channels
+    are different without crashing or producing silence.
+  - The filter-chain module now correctly calculates the output size without
+    crashing in some cases. It also skips invalid ports instead of crashing.
+  - Handle and report pthread errors better.
+
+## SPA
+  - The resampler qualities were tweaked a little.
+  - A bug that would sometimes cut off the last part of a buffer was fixed in
+    the alsa plugin. This could cause broken audio in VMs. (#2536)
+  - Access to the alsa mixer and devices is now checked more thoroughly.
+    (#2534)
+  - The spa-resample tool can now also handle large downsampling rates without
+    crashing.
+  - Audioconverter now uses rounding for float to int conversions, which
+    reduces distortions. Compilation of the c functions was separated and uses
+    its own optimization flags now. Unit tests were added. (#2543)
+  - Noise shaping was improved in audioconvert. A new Wannamaker 3 tap shaper
+    was added.
+  - Audioconvert now uses a pattern for generating keep alive noise. This
+    should have much less energy and be even more inaudible. (#2540)
+  - A channel mapping bug was fixed in audioconvert. Unit tests were added.
+  - The dsp audio mixer would sometimes not mix enough and cause dropouts.
+    (#2525)
+
+## JACK
+  - A critical bug in the mixer was fixed. It would cause most JACK apps to
+    segfault at startup.
+
+## Bluetooth
+  - A new rate control algorithm was implemented for the sources.
+  - The media role on HSP/HFP streams is now fixed.
+
+## Pulse Server
+  - Add the resampler delay to delay reporting as well.
+
+
+Older versions:
+
+# PipeWire 0.3.55 (2022-07-12)
+
+This is a quick bugfix release that is API and ABI compatible with previous
+0.3.x releases.
+
+## Highlights
+  - Fix some more critical bugs in the new audioconvert and the queueing
+    in pw-stream that causes stuttering and hickups.
+  - HFP hardware volumes are now saved and restored.
+  - Format conversions and mixing was improved.
+  - Small bug fixes and improvements.
+
+## PipeWire
+  - The queueing in pw-stream was improved with support for buffer prefetch
+    in async mode.
+  - Add a pw-filter unit test.
+
+## tools
+  - pw-midiplay should now work again after improvements in pw-stream.
+
+## modules
+  - The RAOP module was improved to support auth_setup.
+  - The RAOP module should now handle timing packets better.
+  - Add some more filter-chain examples.
+  - The filter-chain now has a separate config file with the boilerplate
+    settings. The examples are now just config snippets that can be dropped
+    in .conf.d/ directories, such as the filter-chain.conf.d/ one.
+  - Start suggesting to use target.object instead of node.target in docs
+    and examples.
+
+## SPA
+  - Use the cosh window again for the resampler. It should now
+    give better resampler quality. (#2483)
+  - Rework the mixer functions. They were rewritten for higher precision and
+    better performance. Add unit tests and benchmarks.
+  - Improve format conversion for 32bits for avoid errors in clang because
+    of undefined behaviour at extreme ranges.
+  - Fix a bug in audioconvert where it would not consume the right
+    amount of samples when the resampler was disabled. This could cause
+    skipping and hickups. (#2519)
+  - Fix bug in audioconvert where it would try to convert the input samples
+    multiple times, causing strange artifacts when upmixing.
+  - Be more strict about valid JSON floats.
+  - device.vendor.id and device.product.id should now always show up in
+    0xXXXX format and should not be converted to floats in pw-dump anymore.
+  - Add triangular dither, add unit tests for noise generation, add some
+    more optimizations.
+
+## Bluetooth
+  - HFP and A2DP now expose different routes and thus can have different
+    volumes.
+  - HW Volumes for HFP are now synced better. Volume changes from HW buttons
+    are now also saved.
+
+# PipeWire 0.3.54 (2022-07-07)
+
+This is a quick bugfix release that is API and ABI compatible with previous
+0.3.x releases.
+
+## Highlights
+  - Some critical bugs in the new audioconvert were fixed. The old
+    adapter had internal buffering that was abused in some places.
+  - The bluetooth sources were rewritten using a ringbuffer to make them
+    more reliable to jitter and remove old audioconvert behaviour.
+  - Many improvements to the audio converter.
+  - Native DSD128 and up is now supported by pw-dsdplay.
+
+
+## tools
+  - Support DSD128 to DSD512 as well by scaling the amount of samples
+    to read per time slice.
+
+## SPA
+  - Format conversion is now generated with macros to remove duplication
+    of code.
+  - 24bits conversions were rewritten to use the generic conversion
+    functions.
+  - Temporary buffers in audioconvert are now made large enough in all
+    cases.
+  - Fix draining in audioconvert. This fixes speaker-test.
+  - Fix the channel remapping. (#2502, #2490)
+  - Audio conversion constants were tweaked to handle the maximum ranges
+    and provide lossless conversion between 24bits and floats.
+  - Vector code and C code are aligned and the unit tests are activated
+    again. A new lossless conversion test was added.
+  - Fix an underrun case where the adapter would not ask for more data.
+  - Fix PROP_INFO for audioconvert. (#2488)
+  - Use the blackman window again for the resampler, the cosh window has
+    some bugs that can cause distortion in some cases. (#2483)
+  - Add more unit tests for audioconvert. Add end-to-end conversion tests.
+  - Don't leak memory in format converter.
+
+## pulse-server
+  - Card properties are now also added to sinks and sources, just like
+    in pulseaudio.
+  - Increase the maxlength size to at least 4 times the fragsize to avoid
+    xruns.
+  - Fix a race when setting default devices.
+
+## Bluetooth
+  - The source was rewritten to use a ringbuffer. This avoids regressions
+    caused by audioconvert. 
+
+# PipeWire 0.3.53 (2022-06-30)
+
+This is a bugfix release that is API and ABI compatible with previous
+0.3.x releases.
+
+## Highlights
+  - The 44.1KHz samplerate was removed again from the defaults, it caused
+    all kinds of problems with various hardware.
+  - The ALSA plugin should now be able to deal with unsupported samplerates
+    and fall back to the nearest supported one.
+  - The rlimits performance tuning wiki page was updated. Please check
+    you limits.conf file, the version on the wiki used to give all
+    processes a -19 nice level instead of just the pipewire daemon.
+  - The audioconvert plugin was rewritten to be more maintainable and
+    faster. It also gained support for control ports and dithering with
+    optional noise shaping.
+  - An impossible buffering situation is avoided in pulse-server that would
+    cause some applications (sunshine, ...) to stutter.
+
+
+## PipeWire
+  - 44.1KHz was removed from the allowed rates again. It caused all kinds
+    of regressions due to driver bugs and timing issues on HDMI.
+
+## modules
+  - filter-chain now does some more error checking and reporting to
+    avoid some crashes.
+  - filter-chain now supports more channel layouts for input and output
+    that does not need to match the plugin layout.
+  - Format parsing is now more consistent in the modules.
+
+## Tools
+  - pw-cli can now also work without readline support.
+  - pw-cat can now also read multichannel ulaw/alaw/u8/s8.
+
+## SPA
+  - The audioconvert plugin was rewritten. This should make it more
+    maintainable. It also fixed some issues such as CPU spikes in some
+    cases and crashes in others. The old plugins were removed, for a
+    code reduction of some 6000 lines.
+  - The audioconvert plugin now supports control ports, which can be
+    enabled on nodes in the session manager. This makes it possible to
+    control audioconvert properties using timed events or midi.
+  - NoteOn 0-velocity MIDI events are no longer filtered out. This is
+    a valid event, nodes that can't deal with it should fix it up
+    themselves. The JACK layer still filters out these events by default
+    but this can now be configured with a per-client property.
+  - The running status on midi events is now disabled to match what
+    JACK does.
+  - The ALSA plugin will now deal with driver bugs when a driver announces
+    support for a samplerate but then refuses to use it later.
+  - The ALSA plugin has been optimized a little for sample IO.
+  - V4L2 now doesn't error when there are no controls.
+  - Error handling was improved in the audio converter.
+  - The audioconvert plugin now supports rectangular dithering and
+    noise shaping.
+  - The audioconvert plugin can now insert additional inaudible noise
+    that can be used to keep some amplifiers alive. (#705)
+  - The audioconvert format conversion was changed so that it now produces
+    the full 32 bits range in the C fallback conversion code as well.
+  - The resampler window function was changed to a cosh() window
+    function. (#2483)
+  - Vendor and device id are now in hex.
+
+## pulse-server
+  - Tweak the record buffer attributes some more and make sure we don't
+    end up in impossible buffering situations. Fixes an issue with
+    distorted sound in sunshine. (#2447)
+  - Fix a potential crash when updating the client property list.
+  - Some properties on cards were aligned with pulseaudio.
+
+## Wiki
+  - Change "priority" to "nice" in the example limits.conf file. It was
+    giving a -19 nice level to all processes, not just the pipewire
+    daemon.
+
+# PipeWire 0.3.52 (2022-06-09)
+
+This is a bugfix release that is API and ABI compatible with previous
+0.3.x releases.
+
+## Highlights
+  - Add 44.1KHz to allowed samplerates. The server can now switch by
+    default between 48KHz and 44.1KHz.
+  - Streams now allocate less resources.
+  - Fix some bugs that could make the server crash.
+  - Bluetooth now supports the LC3plus vendor codec.
+  - Many bugfixes and improvements.
+
+
+## PipeWire
+  - Add 44.1KHz to allowed samplerates.
+  - Avoid setting the locale.
+  - Avoid use-after-free when destroying a node from spa-node-factory.
+  - Avoid using reallocarray when not available.
+  - Set port alias is not otherwise set.
+
+## Modules
+  - Improve filter-chain parsing and error reporting. Handle empty
+    nodes. (#1950)
+  - Handle destroy of globals and factory in most modules. (#565)
+  - Add refcounts to client and resources to handle destroy of the
+    protocol. (#565)
+  - Handle global node.name in filter-chain and loopback again, use
+    it to construct unique stream names.
+  - Avoid a wrapped pw-node in the adapter. This reduces resources
+    allocated for streams.
+  - Fix a crash when module-x11-bell was unloaded. (#2392)
+  - Add a new module-pipe-tunnel that can write/read data from a
+    UNIX pipe.
+
+## Tools
+  - Fix DSD playback again in pw-cat.
+  - Add -n option to pw-loopback to set node names.
+  - Add -P option to pw-cat to pass properties to the stream.
+  - Support stdin/stdout in pw-cat. (#2387)
+  - pw-dump now also dumps object removal when monitoring. (#2426)
+
+## SPA
+  - Avoid duplicate param results in pw-dump for ports.
+  - Avoid endless loops in audioconvert for badly behaving client.
+    (#2359)
+  - Scale max-error in alsa based on quantum and avoid logging a warning
+    when starting.
+  - Improve debug of failed format conversion. (#2383)
+  - Handle offset in the audio dsp mixer inputs and clamp to the max
+    buffer size.
+  - Add option to disable locale support for JSON number conversion.
+  - Add support for Astro A20 Gen2.
+  - Fix some of the test sources, the flags were not set correctly.
+  - Add camera location as property in libcamera and let the session manager
+    Generate a localized description.
+  - Fix some crashes due to wrong vargar types in v4l2 controls. (#2400)
+  - Improve ALSA resync behaviour. (#2257)
+  - Add support for Komplete Audio 6 MK2.
+  - Improve loop cancel while iterating.
+  - Try not to mix surround channels and AUX channels. Make card with many
+    ports look better when not using the Pro Audio profile.
+  - Vulkan filters were added.
+
+## Bluetooth
+  - Add LC3plus vendor codec.
+  - Handle unsupported indicators better.
+  - Ensure multiple devices on an adapter use different codecs because one
+    endpoint can only be used by one device at a time.
+  - Fix bitpool control as a follower.
+  - Handle bluetooth errors better.
+  - Speed up bluetooth connection by only waiting for the profiles
+    supported by the adapter.
+  - The dummy AVRCP player is disabled by default because it seems to break
+    more devices than it fixes.
+
+## pulse-server
+  - Add initial stream latency property so that devices can be started
+    with a resonably accurate latency.
+  - Fix ringbuffer underrun case. (#2366)
+  - module-native-protocol-tcp now has a auth-anonymous option to give
+    full access to the clients.
+  - Report a node as being moved when it is still moving. This improves
+    compatibility with pasystray.
+  - Avoid overallocating message memory.
+  - Don't export NETWORK nodes in zeroconf. (#2384)
+  - Fix stride for TrueHD and DTSHD passthrough. (#2284)
+  - Make sure we don't send too small audio fragments. Fixes capture
+    from multiple tabs in Chrome. (#2418)
+  - Rework module handling some more.
+  - Use the new native module-pipe-tunnel for pipe-sink and pipe-source.
+  - Implement the STREAM_MOVED message when a stream got moved. (#2407)
+  - Fix a potential segfault when stopping the server and a TCP module
+    as still loaded.
+
+## ALSA
+  - Add support for updating sw_params at runtime, mostly the min-avail
+    param.
+  - Capture and playback nodes are now assumed to use a different clock and
+    will activate the adaptive resampler when linked. This assumption is
+    removed in Pro Audio mode. This provide a better experience out of the
+    box with most devices.
+
+## JACK
+  - Fix setting properties with PIPEWIRE_PROPS again.
+  - Don't use 64 bits atomic operations for sync_timeout. (#1867)
+  - Cleanup in error cases was improved, avoiding some crashes. (#2394)
+
+## GStreamer
+  - Fix pipewiresink in mode=provide. (#1980)
+  - Share memory into a new buffer in pipewiresrc to avoid buffer corruption.
+  - Fixes to the source and fd use.
+  - It is now possible to set client properties as well. (#1573)
+
 # PipeWire 0.3.51 (2022-04-28)
 
 This is a bugfix release that is API and ABI compatible with previous
@@ -92,9 +441,6 @@ This is a bugfix release that is API and ABI compatible with previous
   - Fix a potential deadlock when the process thread is doing IPC and the
     IPC thread is blocking on the data thread.
   - Allocation errors in metadata are handled better.
-
-
-Older versions:
 
 # PipeWire 0.3.50 (2022-04-13)
 

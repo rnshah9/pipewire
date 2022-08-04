@@ -99,7 +99,8 @@
  *         playback.props = {
  *             node.name = "playback.CM106_stereo_pair_2"
  *             audio.position = [ RL RR ]
- *             node.target = "alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71"
+ *             target.object = "alsa_output.usb-0d8c_USB_Sound_Device-00.analog-surround-71"
+ *             node.dont-reconnect = true
  *             stream.dont-remix = true
  *             node.passive = true
  *         }
@@ -188,29 +189,35 @@ static void capture_process(void *d)
 		pw_log_debug("out of playback buffers: %m");
 
 	if (in != NULL && out != NULL) {
-		uint32_t size = 0;
+		uint32_t outsize = UINT32_MAX;
 		int32_t stride = 0;
+		struct spa_data *d;
+		const void *src[in->buffer->n_datas];
 
+		for (i = 0; i < in->buffer->n_datas; i++) {
+			uint32_t offs, size;
+
+			d = &in->buffer->datas[i];
+			offs = SPA_MIN(d->chunk->offset, d->maxsize);
+			size = SPA_MIN(d->chunk->size, d->maxsize - offs);
+
+			src[i] = SPA_PTROFF(d->data, offs, void);
+			outsize = SPA_MIN(outsize, size);
+			stride = SPA_MAX(stride, d->chunk->stride);
+		}
 		for (i = 0; i < out->buffer->n_datas; i++) {
-			struct spa_data *ds, *dd;
+			d = &out->buffer->datas[i];
 
-			dd = &out->buffer->datas[i];
+			outsize = SPA_MIN(outsize, d->maxsize);
 
-			if (i < in->buffer->n_datas) {
-				ds = &in->buffer->datas[i];
+			if (i < in->buffer->n_datas)
+				memcpy(d->data, src[i], outsize);
+			else
+				memset(d->data, 0, outsize);
 
-				memcpy(dd->data,
-					SPA_PTROFF(ds->data, ds->chunk->offset, void),
-					ds->chunk->size);
-
-				size = SPA_MAX(size, ds->chunk->size);
-				stride = SPA_MAX(stride, ds->chunk->stride);
-			} else {
-				memset(dd->data, 0, size);
-			}
-			dd->chunk->offset = 0;
-			dd->chunk->size = size;
-			dd->chunk->stride = stride;
+			d->chunk->offset = 0;
+			d->chunk->size = outsize;
+			d->chunk->stride = stride;
 		}
 	}
 
@@ -449,6 +456,7 @@ static void parse_audio_info(struct pw_properties *props, struct spa_audio_info_
 			.format = SPA_AUDIO_FORMAT_F32P);
 	info->rate = pw_properties_get_int32(props, PW_KEY_AUDIO_RATE, 0);
 	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, 0);
+	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
 	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
 		parse_position(info, str, strlen(str));
 }

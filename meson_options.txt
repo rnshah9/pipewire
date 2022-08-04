@@ -116,6 +116,10 @@ option('bluez5-codec-lc3plus',
         description: 'Enable LC3plus open source codec implementation',
         type: 'feature',
         value: 'auto')
+option('bluez5-codec-opus',
+        description: 'Enable Opus open source codec implementation',
+        type: 'feature',
+        value: 'auto')
 option('control',
        description: 'Enable control spa plugin integration',
        type: 'feature',
@@ -245,3 +249,11 @@ option('legacy-rtkit',
        description: 'Build legacy rtkit module',
        type: 'boolean',
        value: 'true')
+option('avb',
+       description: 'Enable AVB code',
+       type: 'feature',
+       value: 'auto')
+option('flatpak',
+       description: 'Enable Flatpak support',
+       type: 'feature',
+       value: 'enabled')

@@ -51,6 +51,7 @@ List of known modules:
 
 - \subpage page_module_access
 - \subpage page_module_adapter
+- \subpage page_module_avb
 - \subpage page_module_client_device
 - \subpage page_module_client_node
 - \subpage page_module_echo_cancel
@@ -61,6 +62,7 @@ List of known modules:
 - \subpage page_module_link_factory
 - \subpage page_module_loopback
 - \subpage page_module_metadata
+- \subpage page_module_pipe_tunnel
 - \subpage page_module_portal
 - \subpage page_module_profiler
 - \subpage page_module_protocol_native

@@ -64,6 +64,7 @@
  * Options with well-known behavior.
  *
  * - \ref PW_KEY_REMOTE_NAME
+ * - \ref PW_KEY_AUDIO_FORMAT
  * - \ref PW_KEY_AUDIO_RATE
  * - \ref PW_KEY_AUDIO_CHANNELS
  * - \ref SPA_KEY_AUDIO_POSITION
@@ -99,15 +100,15 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 
 #define DEFAULT_FORMAT "S16"
 #define DEFAULT_RATE 48000
-#define DEFAULT_CHANNELS "2"
+#define DEFAULT_CHANNELS 2
 #define DEFAULT_POSITION "[ FL FR ]"
 
 #define MODULE_USAGE	"[ node.latency=<latency as fraction> ] "				\
 			"[ node.name=<name of the nodes> ] "					\
 			"[ node.description=<description of the nodes> ] "			\
 			"[ audio.format=<format, default:"DEFAULT_FORMAT"> ] "			\
-			"[ audio.rate=<sample rate, default: 48000> ] "				\
-			"[ audio.channels=<number of channels, default:"DEFAULT_CHANNELS"> ] "	\
+			"[ audio.rate=<sample rate, default: "SPA_STRINGIFY(DEFAULT_RATE)"> ] "			\
+			"[ audio.channels=<number of channels, default:"SPA_STRINGIFY(DEFAULT_CHANNELS) "> ] "	\
 			"[ audio.position=<channel map, default:"DEFAULT_POSITION"> ] "		\
 			"[ stream.props=<properties> ] "
 
@@ -187,7 +188,7 @@ static void playback_stream_process(void *d)
 	struct pw_buffer *buf;
 	struct spa_data *bd;
 	void *data;
-	uint32_t size;
+	uint32_t offs, size;
 
 	if ((buf = pw_stream_dequeue_buffer(impl->stream)) == NULL) {
 		pw_log_debug("out of buffers: %m");
@@ -195,8 +196,10 @@ static void playback_stream_process(void *d)
 	}
 
 	bd = &buf->buffer->datas[0];
-	data = SPA_PTROFF(bd->data, bd->chunk->offset, void);
-	size = bd->chunk->size;
+
+	offs = SPA_MIN(bd->chunk->offset, bd->maxsize);
+	size = SPA_MIN(bd->chunk->size, bd->maxsize - offs);
+	data = SPA_PTROFF(bd->data, offs, void);
 
 	/* write buffer contents here */
 	pw_log_info("got buffer of size %d and data %p", size, data);
@@ -338,58 +341,59 @@ static void parse_position(struct spa_audio_info_raw *info, const char *val, siz
 	}
 }
 
-static int parse_audio_info(struct impl *impl)
+static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	struct pw_properties *props = impl->stream_props;
-	struct spa_audio_info_raw *info = &impl->info;
 	const char *str;
 
 	spa_zero(*info);
-
 	if ((str = pw_properties_get(props, PW_KEY_AUDIO_FORMAT)) == NULL)
 		str = DEFAULT_FORMAT;
 	info->format = format_from_name(str, strlen(str));
-	switch (info->format) {
-	case SPA_AUDIO_FORMAT_S8:
-	case SPA_AUDIO_FORMAT_U8:
-		impl->frame_size = 1;
-		break;
-	case SPA_AUDIO_FORMAT_S16:
-		impl->frame_size = 2;
-		break;
-	case SPA_AUDIO_FORMAT_S24:
-		impl->frame_size = 3;
-		break;
-	case SPA_AUDIO_FORMAT_S24_32:
-	case SPA_AUDIO_FORMAT_S32:
-	case SPA_AUDIO_FORMAT_F32:
-		impl->frame_size = 4;
-		break;
-	case SPA_AUDIO_FORMAT_F64:
-		impl->frame_size = 8;
-		break;
-	default:
-		pw_log_error("unsupported format '%s'", str);
-		return -EINVAL;
-	}
-	info->rate = pw_properties_get_uint32(props, PW_KEY_AUDIO_RATE, DEFAULT_RATE);
-	if (info->rate == 0) {
-		pw_log_error("invalid rate '%s'", str);
-		return -EINVAL;
-	}
-	if ((str = pw_properties_get(props, PW_KEY_AUDIO_CHANNELS)) == NULL)
-		str = DEFAULT_CHANNELS;
-	info->channels = atoi(str);
-	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) == NULL)
-		str = DEFAULT_POSITION;
-	parse_position(info, str, strlen(str));
-	if (info->channels == 0) {
-		pw_log_error("invalid channels '%s'", str);
-		return -EINVAL;
-	}
-	impl->frame_size *= info->channels;
 
-	return 0;
+	info->rate = pw_properties_get_uint32(props, PW_KEY_AUDIO_RATE, info->rate);
+	if (info->rate == 0)
+		info->rate = DEFAULT_RATE;
+
+	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
+	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
+	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
+		parse_position(info, str, strlen(str));
+	if (info->channels == 0)
+		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
+}
+
+static int calc_frame_size(const struct spa_audio_info_raw *info)
+{
+	int res = info->channels;
+	switch (info->format) {
+	case SPA_AUDIO_FORMAT_U8:
+	case SPA_AUDIO_FORMAT_S8:
+	case SPA_AUDIO_FORMAT_ALAW:
+	case SPA_AUDIO_FORMAT_ULAW:
+		return res;
+	case SPA_AUDIO_FORMAT_S16:
+	case SPA_AUDIO_FORMAT_S16_OE:
+	case SPA_AUDIO_FORMAT_U16:
+		return res * 2;
+	case SPA_AUDIO_FORMAT_S24:
+	case SPA_AUDIO_FORMAT_S24_OE:
+	case SPA_AUDIO_FORMAT_U24:
+		return res * 3;
+	case SPA_AUDIO_FORMAT_S24_32:
+	case SPA_AUDIO_FORMAT_S24_32_OE:
+	case SPA_AUDIO_FORMAT_S32:
+	case SPA_AUDIO_FORMAT_S32_OE:
+	case SPA_AUDIO_FORMAT_U32:
+	case SPA_AUDIO_FORMAT_U32_OE:
+	case SPA_AUDIO_FORMAT_F32:
+	case SPA_AUDIO_FORMAT_F32_OE:
+		return res * 4;
+	case SPA_AUDIO_FORMAT_F64:
+	case SPA_AUDIO_FORMAT_F64_OE:
+		return res * 8;
+	default:
+		return 0;
+	}
 }
 
 static void copy_props(struct impl *impl, struct pw_properties *props, const char *key)
@@ -467,7 +471,11 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
 	copy_props(impl, props, PW_KEY_MEDIA_CLASS);
 
-	if ((res = parse_audio_info(impl)) < 0) {
+	parse_audio_info(impl->stream_props, &impl->info);
+
+	impl->frame_size = calc_frame_size(&impl->info);
+	if (impl->frame_size == 0) {
+		res = -EINVAL;
 		pw_log_error( "can't parse audio format");
 		goto error;
 	}

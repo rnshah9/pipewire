@@ -101,40 +101,22 @@ static const struct spa_dict_item module_always_sink_info[] = {
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
-struct module *create_module_always_sink(struct impl *impl, const char *argument)
+static int module_always_sink_prepare(struct module * const module)
 {
-	struct module *module;
-	struct pw_properties *props = NULL;
-	int res;
-
 	PW_LOG_TOPIC_INIT(mod_topic);
 
-	props = pw_properties_new_dict(&SPA_DICT_INIT_ARRAY(module_always_sink_info));
-	if (props == NULL) {
-		res = -EINVAL;
-		goto out;
-	}
-	if (argument)
-		module_args_add_props(props, argument);
+	struct module_always_sink_data * const data = module->user_data;
+	data->module = module;
 
-	module = module_new(impl, sizeof(struct module_always_sink_data));
-	if (module == NULL) {
-		res = -errno;
-		goto out;
-	}
-	module->props = props;
-
-	return module;
-out:
-	pw_properties_free(props);
-	errno = -res;
-	return NULL;
+	return 0;
 }
 
 DEFINE_MODULE_INFO(module_always_sink) = {
 	.name = "module-always-sink",
 	.load_once = true,
-	.create = create_module_always_sink,
+	.prepare = module_always_sink_prepare,
 	.load = module_always_sink_load,
 	.unload = module_always_sink_unload,
+	.properties = &SPA_DICT_INIT_ARRAY(module_always_sink_info),
+	.data_size = sizeof(struct module_always_sink_data),
 };

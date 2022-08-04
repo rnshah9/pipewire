@@ -466,7 +466,9 @@ int spa_alsa_init(struct state *state, const struct spa_dict *info)
 	}
 	if (state->clock_name[0] == '\0')
 		snprintf(state->clock_name, sizeof(state->clock_name),
-				"api.alsa.%u", state->card_index);
+				"api.alsa.%s-%u",
+				state->stream == SND_PCM_STREAM_PLAYBACK ? "p" : "c",
+				state->card_index);
 
 	if (state->stream == SND_PCM_STREAM_PLAYBACK) {
 		state->is_iec958 = spa_strstartswith(state->props.device, "iec958");
@@ -750,7 +752,7 @@ static bool uint32_array_contains(uint32_t *vals, uint32_t n_vals, uint32_t val)
 }
 
 static int add_rate(struct state *state, uint32_t scale, bool all, uint32_t index, uint32_t *next,
-		snd_pcm_hw_params_t *params, struct spa_pod_builder *b)
+		uint32_t min_allowed_rate, snd_pcm_hw_params_t *params, struct spa_pod_builder *b)
 {
 	struct spa_pod_frame f[1];
 	int err, dir;
@@ -760,6 +762,12 @@ static int add_rate(struct state *state, uint32_t scale, bool all, uint32_t inde
 
 	CHECK(snd_pcm_hw_params_get_rate_min(params, &min, &dir), "get_rate_min");
 	CHECK(snd_pcm_hw_params_get_rate_max(params, &max, &dir), "get_rate_max");
+
+	spa_log_debug(state->log, "min:%u max:%u min-allowed:%u scale:%u all:%d",
+			min, max, min_allowed_rate, scale, all);
+
+	min_allowed_rate /= scale;
+	min = SPA_MAX(min_allowed_rate, min);
 
 	if (!state->multi_rate && state->card->format_ref > 0)
 		rate = state->card->rate;
@@ -776,6 +784,9 @@ static int add_rate(struct state *state, uint32_t scale, bool all, uint32_t inde
 		rate = state->position ? state->position->clock.rate.denom : DEFAULT_RATE;
 
 	rate = SPA_CLAMP(rate, min, max);
+
+	spa_log_debug(state->log, "rate:%u multi:%d card:%d def:%d",
+			rate, state->multi_rate, state->card->rate, state->default_rate);
 
 	spa_pod_builder_prop(b, SPA_FORMAT_AUDIO_rate, 0);
 
@@ -828,7 +839,8 @@ static int add_channels(struct state *state, bool all, uint32_t index, uint32_t 
 
 	CHECK(snd_pcm_hw_params_get_channels_min(params, &min), "get_channels_min");
 	CHECK(snd_pcm_hw_params_get_channels_max(params, &max), "get_channels_max");
-	spa_log_debug(state->log, "channels (%d %d)", min, max);
+	spa_log_debug(state->log, "channels (%d %d) default:%d all:%d",
+			min, max, state->default_channels, all);
 
 	if (state->default_channels != 0 && !all) {
 		if (min < state->default_channels)
@@ -1015,7 +1027,7 @@ static int enum_pcm_formats(struct state *state, uint32_t index, uint32_t *next,
 		choice->body.type = SPA_CHOICE_Enum;
 	spa_pod_builder_pop(b, &f[1]);
 
-	if ((res = add_rate(state, 1, false, index & 0xffff, next, params, b)) != 1)
+	if ((res = add_rate(state, 1, false, index & 0xffff, next, 0, params, b)) != 1)
 		return res;
 
 	if ((res = add_channels(state, false, index & 0xffff, next, params, b)) != 1)
@@ -1108,7 +1120,7 @@ static int enum_iec958_formats(struct state *state, uint32_t index, uint32_t *ne
 	}
 	spa_pod_builder_pop(b, &f[1]);
 
-	if ((res = add_rate(state, 1, true, index & 0xffff, next, params, b)) != 1)
+	if ((res = add_rate(state, 1, true, index & 0xffff, next, 0, params, b)) != 1)
 		return res;
 
 	(*next)++;
@@ -1163,7 +1175,14 @@ static int enum_dsd_formats(struct state *state, uint32_t index, uint32_t *next,
 	spa_pod_builder_prop(b, SPA_FORMAT_AUDIO_interleave, 0);
 	spa_pod_builder_int(b, interleave);
 
-	if ((res = add_rate(state, SPA_ABS(interleave), true, index & 0xffff, next, params, b)) != 1)
+	/* Use a lower rate limit of 352800 (= 44100 * 64 / 8). This is because in
+	 * PipeWire, DSD rates are given in bytes, not bits, so 352800 corresponds
+	 * to the bit rate of DSD64. (The "64" in DSD64 means "64 times the rate
+	 * of 44.1 kHz".) Some hardware may report rates lower than that, for example
+	 * 176400. This would correspond to "DSD32" (which does not exist). Trying
+	 * to use such a rate with DSD hardware does not work and may cause undefined
+	 * behavior in said hardware. */
+	if ((res = add_rate(state, SPA_ABS(interleave), true, index & 0xffff, next, 44100 * 64 / 8, params, b)) != 1)
 		return res;
 
 	if ((res = add_channels(state, true, index & 0xffff, next, params, b)) != 1)
@@ -1407,7 +1426,10 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 				state->props.device, rchannels, val);
 		if (!SPA_FLAG_IS_SET(flags, SPA_NODE_PARAM_FLAG_NEAREST))
 			return -EINVAL;
+		if (fmt->media_subtype != SPA_MEDIA_SUBTYPE_raw)
+			return -EINVAL;
 		rchannels = val;
+		fmt->info.raw.channels = rchannels;
 		match = false;
 	}
 
@@ -1427,7 +1449,10 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 				state->props.device, rrate, val);
 		if (!SPA_FLAG_IS_SET(flags, SPA_NODE_PARAM_FLAG_NEAREST))
 			return -EINVAL;
+		if (fmt->media_subtype != SPA_MEDIA_SUBTYPE_raw)
+			return -EINVAL;
 		rrate = val;
+		fmt->info.raw.rate = rrate;
 		match = false;
 	}
 
@@ -1760,6 +1785,7 @@ static int get_status(struct state *state, uint64_t current_time,
 		*delay = avail;
 		*target = SPA_MAX(*target, state->read_size);
 	}
+	*target = SPA_MIN(*target, state->buffer_frames);
 	return 0;
 }
 
@@ -1862,6 +1888,11 @@ static int setup_matching(struct state *state)
 		state->matching = false;
 
 	state->resample = ((uint32_t)state->rate != state->rate_denom) || state->matching;
+
+	spa_log_info(state->log, "driver clock:'%s'@%d our clock:'%s'@%d matching:%d resample:%d",
+			state->position->clock.name, state->rate_denom,
+			state->clock_name, state->rate,
+			state->matching, state->resample);
 	return 0;
 }
 
@@ -1888,6 +1919,7 @@ int spa_alsa_write(struct state *state)
 	snd_pcm_uframes_t written, frames, offset, off, to_write, total_written, max_write;
 	snd_pcm_sframes_t commitres;
 	int res = 0;
+	size_t frame_size = state->frame_size;
 
 	check_position_config(state);
 
@@ -1900,6 +1932,9 @@ int spa_alsa_write(struct state *state)
 		current_time = state->position->clock.nsec;
 
 		if (SPA_UNLIKELY((res = get_status(state, current_time, &delay, &target)) < 0))
+			return res;
+
+		if (SPA_UNLIKELY((res = update_time(state, current_time, delay, target, true)) < 0))
 			return res;
 
 		if (SPA_UNLIKELY(state->alsa_sync)) {
@@ -1918,8 +1953,6 @@ int spa_alsa_write(struct state *state)
 			delay = target;
 			state->alsa_sync = false;
 		}
-		if (SPA_UNLIKELY((res = update_time(state, current_time, delay, target, true)) < 0))
-			return res;
 	}
 
 	total_written = 0;
@@ -1943,61 +1976,43 @@ again:
 	written = 0;
 
 	while (!spa_list_is_empty(&state->ready) && to_write > 0) {
-		uint8_t *dst, *src;
 		size_t n_bytes, n_frames;
 		struct buffer *b;
 		struct spa_data *d;
-		uint32_t i, index, offs, avail, size, maxsize, l0, l1;
+		uint32_t i, offs, size, last_offset;
 
 		b = spa_list_first(&state->ready, struct buffer, link);
 		d = b->buf->datas;
 
-		size = d[0].chunk->size;
-		maxsize = d[0].maxsize;
+		offs = d[0].chunk->offset + state->ready_offset;
+		last_offset = d[0].chunk->size;
+		size = last_offset - state->ready_offset;
 
-		index = d[0].chunk->offset + state->ready_offset;
-		avail = size - state->ready_offset;
-		avail /= state->frame_size;
+		offs = SPA_MIN(offs, d[0].maxsize);
+		size = SPA_MIN(d[0].maxsize - offs, size);
 
-		n_frames = SPA_MIN(avail, to_write);
-		n_bytes = n_frames * state->frame_size;
-
-		offs = index % maxsize;
-		l0 = SPA_MIN(n_bytes, maxsize - offs);
-		l1 = n_bytes - l0;
+		n_frames = SPA_MIN(size / frame_size, to_write);
+		n_bytes = n_frames * frame_size;
 
 		if (SPA_LIKELY(state->use_mmap)) {
 			for (i = 0; i < b->buf->n_datas; i++) {
-				dst = SPA_PTROFF(my_areas[i].addr, off * state->frame_size, uint8_t);
-				src = d[i].data;
-
-				spa_memcpy(dst, src + offs, l0);
-				if (SPA_UNLIKELY(l1 > 0))
-					spa_memcpy(dst + l0, src, l1);
+				spa_memcpy(SPA_PTROFF(my_areas[i].addr, off * frame_size, void),
+						SPA_PTROFF(d[i].data, offs, void), n_bytes);
 			}
 		} else {
-			if (state->planar) {
-				void *bufs[b->buf->n_datas];
+			void *bufs[b->buf->n_datas];
+			for (i = 0; i < b->buf->n_datas; i++)
+				bufs[i] = SPA_PTROFF(d[i].data, offs, void);
 
-				for (i = 0; i < b->buf->n_datas; i++)
-					bufs[i] = SPA_PTROFF(d[i].data, offs, void);
-				snd_pcm_writen(hndl, bufs, l0 / state->frame_size);
-				if (SPA_UNLIKELY(l1 > 0)) {
-					for (i = 0; i < b->buf->n_datas; i++)
-						bufs[i] = d[i].data;
-					snd_pcm_writen(hndl, bufs, l1 / state->frame_size);
-				}
-			} else {
-				src = d[0].data;
-				snd_pcm_writei(hndl, src + offs, l0 / state->frame_size);
-				if (SPA_UNLIKELY(l1 > 0))
-					snd_pcm_writei(hndl, src, l1 / state->frame_size);
-			}
+			if (state->planar)
+				snd_pcm_writen(hndl, bufs, n_frames);
+			else
+				snd_pcm_writei(hndl, bufs[0], n_frames);
 		}
 
 		state->ready_offset += n_bytes;
 
-		if (state->ready_offset >= size) {
+		if (state->ready_offset >= last_offset) {
 			spa_list_remove(&b->link);
 			SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUT);
 			state->io->buffer_id = b->id;
@@ -2063,8 +2078,7 @@ push_frames(struct state *state,
 		spa_log_warn(state->log, "%s: no more buffers", state->props.device);
 		total_frames = frames;
 	} else {
-		uint8_t *src;
-		size_t n_bytes, left;
+		size_t n_bytes, left, frame_size = state->frame_size;
 		struct buffer *b;
 		struct spa_data *d;
 		uint32_t i, avail, l0, l1;
@@ -2080,23 +2094,26 @@ push_frames(struct state *state,
 
 		d = b->buf->datas;
 
-		avail = d[0].maxsize / state->frame_size;
+		avail = d[0].maxsize / frame_size;
 		total_frames = SPA_MIN(avail, frames);
-		n_bytes = total_frames * state->frame_size;
+		n_bytes = total_frames * frame_size;
 
 		if (my_areas) {
 			left = state->buffer_frames - offset;
-			l0 = SPA_MIN(n_bytes, left * state->frame_size);
+			l0 = SPA_MIN(n_bytes, left * frame_size);
 			l1 = n_bytes - l0;
 
 			for (i = 0; i < b->buf->n_datas; i++) {
-				src = SPA_PTROFF(my_areas[i].addr, offset * state->frame_size, uint8_t);
-				spa_memcpy(d[i].data, src, l0);
-				if (l1 > 0)
-					spa_memcpy(SPA_PTROFF(d[i].data, l0, void), my_areas[i].addr, l1);
+				spa_memcpy(d[i].data,
+						SPA_PTROFF(my_areas[i].addr, offset * frame_size, void),
+						l0);
+				if (SPA_UNLIKELY(l1 > 0))
+					spa_memcpy(SPA_PTROFF(d[i].data, l0, void),
+							my_areas[i].addr,
+							l1);
 				d[i].chunk->offset = 0;
 				d[i].chunk->size = n_bytes;
-				d[i].chunk->stride = state->frame_size;
+				d[i].chunk->stride = frame_size;
 			}
 		} else {
 			void *bufs[b->buf->n_datas];
@@ -2104,7 +2121,7 @@ push_frames(struct state *state,
 				bufs[i] = d[i].data;
 				d[i].chunk->offset = 0;
 				d[i].chunk->size = n_bytes;
-				d[i].chunk->stride = state->frame_size;
+				d[i].chunk->stride = frame_size;
 			}
 			if (state->planar) {
 				snd_pcm_readn(state->hndl, bufs, total_frames);
@@ -2146,6 +2163,9 @@ int spa_alsa_read(struct state *state)
 
 		avail = delay;
 
+		if (SPA_UNLIKELY((res = update_time(state, current_time, delay, target, true)) < 0))
+			return res;
+
 		if (state->alsa_sync) {
 			if (SPA_UNLIKELY(state->alsa_sync_warning)) {
 				spa_log_warn(state->log, "%s: follower delay:%lu target:%lu thr:%u, resync",
@@ -2162,9 +2182,6 @@ int spa_alsa_read(struct state *state)
 			delay = target;
 			state->alsa_sync = false;
 		}
-
-		if ((res = update_time(state, current_time, delay, target, true)) < 0)
-			return res;
 
 		if (avail < state->read_size)
 			max_read = 0;

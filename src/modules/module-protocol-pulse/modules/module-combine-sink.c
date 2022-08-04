@@ -124,8 +124,7 @@ static void capture_process(void *d)
 
 	for (i = 0; i < MAX_SINKS; i++) {
 		struct pw_buffer *out;
-		uint32_t j, size = 0;
-		int32_t stride = 0;
+		uint32_t j;
 
 		if (data->streams[i].stream == NULL || data->streams[i].cleanup)
 			continue;
@@ -142,23 +141,29 @@ static void capture_process(void *d)
 
 		for (j = 0; j < out->buffer->n_datas; j++) {
 			struct spa_data *ds, *dd;
+			uint32_t outsize = 0;
+			int32_t stride = 0;
 
 			dd = &out->buffer->datas[j];
 
 			if (j < in->buffer->n_datas) {
+				uint32_t offs, size;
+
 				ds = &in->buffer->datas[j];
 
-				memcpy(dd->data,
-					SPA_PTROFF(ds->data, ds->chunk->offset, void),
-					ds->chunk->size);
+				offs = SPA_MIN(ds->chunk->offset, ds->maxsize);
+				size = SPA_MIN(ds->chunk->size, ds->maxsize - offs);
 
-				size = SPA_MAX(size, ds->chunk->size);
+				memcpy(dd->data,
+					SPA_PTROFF(ds->data, offs, void), size);
+
+				outsize = SPA_MAX(outsize, size);
 				stride = SPA_MAX(stride, ds->chunk->stride);
 			} else {
-				memset(dd->data, 0, size);
+				memset(dd->data, 0, outsize);
 			}
 			dd->chunk->offset = 0;
-			dd->chunk->size = size;
+			dd->chunk->size = outsize;
 			dd->chunk->stride = stride;
 		}
 
@@ -499,11 +504,10 @@ static int module_combine_sink_unload(struct module *module)
 	return 0;
 }
 
-struct module *create_module_combine_sink(struct impl *impl, const char *argument)
+static int module_combine_sink_prepare(struct module * const module)
 {
-	struct module *module;
-	struct module_combine_sink_data *d;
-	struct pw_properties *props = NULL;
+	struct module_combine_sink_data * const d = module->user_data;
+	struct pw_properties * const props = module->props;
 	const char *str;
 	char *sink_name = NULL, **sink_names = NULL;
 	struct spa_audio_info_raw info = { 0 };
@@ -511,14 +515,6 @@ struct module *create_module_combine_sink(struct impl *impl, const char *argumen
 	int num_sinks = 0;
 
 	PW_LOG_TOPIC_INIT(mod_topic);
-
-	props = pw_properties_new_dict(&SPA_DICT_INIT_ARRAY(module_combine_sink_info));
-	if (!props) {
-		res = -EINVAL;
-		goto out;
-	}
-	if (argument)
-		module_args_add_props(props, argument);
 
 	if ((str = pw_properties_get(props, "sink_name")) != NULL) {
 		sink_name = strdup(str);
@@ -542,19 +538,11 @@ struct module *create_module_combine_sink(struct impl *impl, const char *argumen
 		pw_properties_set(props, "resample_method", NULL);
 	}
 
-	if (module_args_to_audioinfo(impl, props, &info) < 0) {
+	if (module_args_to_audioinfo(module->impl, props, &info) < 0) {
 		res = -EINVAL;
 		goto out;
 	}
 
-	module = module_new(impl, sizeof(*d));
-	if (module == NULL) {
-		res = -errno;
-		goto out;
-	}
-
-	module->props = props;
-	d = module->user_data;
 	d->module = module;
 	d->info = info;
 	d->sink_name = sink_name;
@@ -565,18 +553,19 @@ struct module *create_module_combine_sink(struct impl *impl, const char *argumen
 		d->streams[i].cleanup = false;
 	}
 
-	return module;
+	return 0;
 out:
-	pw_properties_free(props);
 	free(sink_name);
 	pw_free_strv(sink_names);
-	errno = -res;
-	return NULL;
+
+	return res;
 }
 
 DEFINE_MODULE_INFO(module_combine_sink) = {
 	.name = "module-combine-sink",
-	.create = create_module_combine_sink,
+	.prepare = module_combine_sink_prepare,
 	.load = module_combine_sink_load,
 	.unload = module_combine_sink_unload,
+	.properties = &SPA_DICT_INIT_ARRAY(module_combine_sink_info),
+	.data_size = sizeof(struct module_combine_sink_data),
 };

@@ -29,6 +29,7 @@
 extern "C" {
 #endif
 
+#include <stdlib.h>
 #include <string.h>
 #include <sys/un.h>
 #ifndef _POSIX_C_SOURCE
@@ -86,6 +87,9 @@ pw_strip(char *str, const char *whitespace);
 #endif
 
 ssize_t pw_getrandom(void *buf, size_t buflen, unsigned int flags);
+
+void* pw_reallocarray(void *ptr, size_t nmemb, size_t size);
+
 /**
  * \}
  */

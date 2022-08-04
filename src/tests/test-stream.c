@@ -251,5 +251,7 @@ int main(int argc, char *argv[])
 	test_create();
 	test_properties();
 
+	pw_deinit();
+
 	return 0;
 }

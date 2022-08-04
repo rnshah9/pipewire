@@ -80,6 +80,7 @@
  *
  * - \ref PW_KEY_AUDIO_RATE
  * - \ref PW_KEY_AUDIO_CHANNELS
+ * - \ref SPA_KEY_AUDIO_POSITION
  * - \ref PW_KEY_MEDIA_CLASS
  * - \ref PW_KEY_NODE_LATENCY
  * - \ref PW_KEY_NODE_NAME
@@ -89,7 +90,6 @@
  * - \ref PW_KEY_NODE_VIRTUAL
  * - \ref PW_KEY_NODE_LATENCY
  * - \ref PW_KEY_REMOTE_NAME
- * - \ref SPA_KEY_AUDIO_POSITION
  *
  * ## Example configuration
  *\code{.unparsed}
@@ -124,6 +124,10 @@
 
 PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
+
+#define DEFAULT_RATE 48000
+#define DEFAULT_CHANNELS 2
+#define DEFAULT_POSITION "[ FL FR ]"
 
 /* Hopefully this is enough for any combination of AEC engine and resampler
  * input requirement for rate matching */
@@ -339,16 +343,20 @@ static void capture_process(void *data)
 	struct impl *impl = data;
 	struct pw_buffer *buf;
 	struct spa_data *d;
-	uint32_t i, index, size;
+	uint32_t i, index, offs, size;
 	int32_t avail;
 
 	if ((buf = pw_stream_dequeue_buffer(impl->capture)) == NULL) {
 		pw_log_debug("out of capture buffers: %m");
 		return;
 	}
+	d = &buf->buffer->datas[0];
+
+	offs = SPA_MIN(d->chunk->offset, d->maxsize);
+	size = SPA_MIN(d->chunk->size, d->maxsize - offs);
 
 	avail = spa_ringbuffer_get_write_index(&impl->rec_ring, &index);
-	size = buf->buffer->datas[0].chunk->size;
+
 	if (avail + size > impl->rec_ringsize) {
 		uint32_t rindex, drop;
 
@@ -375,10 +383,12 @@ static void capture_process(void *data)
 		/* captured samples, with echo from sink */
 		d = &buf->buffer->datas[i];
 
+		offs = SPA_MIN(d->chunk->offset, d->maxsize);
+		size = SPA_MIN(d->chunk->size, d->maxsize - offs);
+
 		spa_ringbuffer_write_data(&impl->rec_ring, impl->rec_buffer[i],
 				impl->rec_ringsize, index % impl->rec_ringsize,
-				SPA_PTROFF(d->data, d->chunk->offset, void),
-				d->chunk->size);
+				SPA_PTROFF(d->data, offs, void), size);
 	}
 
 	spa_ringbuffer_write_update(&impl->rec_ring, index + size);
@@ -526,16 +536,20 @@ static void sink_process(void *data)
 	struct impl *impl = data;
 	struct pw_buffer *buf;
 	struct spa_data *d;
-	uint32_t i, index, size;
+	uint32_t i, index, offs, size;
 	int32_t avail;
 
 	if ((buf = pw_stream_dequeue_buffer(impl->sink)) == NULL) {
 		pw_log_debug("out of sink buffers: %m");
 		return;
 	}
+	d = &buf->buffer->datas[0];
+
+	offs = SPA_MIN(d->chunk->offset, d->maxsize);
+	size = SPA_MIN(d->chunk->size, d->maxsize - offs);
 
 	avail = spa_ringbuffer_get_write_index(&impl->play_ring, &index);
-	size = buf->buffer->datas[0].chunk->size;
+
 	if (avail + size > impl->play_ringsize) {
 		uint32_t rindex, drop;
 
@@ -562,12 +576,13 @@ static void sink_process(void *data)
 		/* echo from sink */
 		d = &buf->buffer->datas[i];
 
+		offs = SPA_MIN(d->chunk->offset, d->maxsize);
+		size = SPA_MIN(d->chunk->size, d->maxsize - offs);
+
 		spa_ringbuffer_write_data(&impl->play_ring, impl->play_buffer[i],
 				impl->play_ringsize, index % impl->play_ringsize,
-				SPA_PTROFF(d->data, d->chunk->offset, void),
-				d->chunk->size);
+				SPA_PTROFF(d->data, offs, void), size);
 	}
-
 	spa_ringbuffer_write_update(&impl->play_ring, index + size);
 
 	if (avail + size >= impl->aec_blocksize) {
@@ -848,9 +863,15 @@ static void parse_audio_info(struct pw_properties *props, struct spa_audio_info_
 	*info = SPA_AUDIO_INFO_RAW_INIT(
 			.format = SPA_AUDIO_FORMAT_F32P);
 	info->rate = pw_properties_get_uint32(props, PW_KEY_AUDIO_RATE, info->rate);
+	if (info->rate == 0)
+		info->rate = DEFAULT_RATE;
+
 	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
+	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
 	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
 		parse_position(info, str, strlen(str));
+	if (info->channels == 0)
+		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
 }
 
 static void copy_props(struct impl *impl, struct pw_properties *props, const char *key)
@@ -916,14 +937,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	parse_audio_info(props, &impl->info);
 
-	if (impl->info.channels == 0) {
-		impl->info.channels = 2;
-		impl->info.position[0] = SPA_AUDIO_CHANNEL_FL;
-		impl->info.position[1] = SPA_AUDIO_CHANNEL_FR;
-	}
-	if (impl->info.rate == 0)
-		impl->info.rate = 48000;
-
 	if ((str = pw_properties_get(props, "source.props")) != NULL)
 		pw_properties_update_string(impl->source_props, str, strlen(str));
 	if ((str = pw_properties_get(props, "sink.props")) != NULL)
@@ -979,8 +992,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		res = -ENOENT;
 		goto error;
 	}
-
-	(void)SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_AUDIO_AEC, (struct spa_audio_aec *)impl->aec);
 
 	pw_log_info("Using plugin AEC %s", impl->aec->name);
 

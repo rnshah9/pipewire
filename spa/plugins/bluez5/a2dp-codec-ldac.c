@@ -150,7 +150,7 @@ static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
         return sizeof(conf);
 }
 
-static int codec_enum_config(const struct a2dp_codec *codec,
+static int codec_enum_config(const struct a2dp_codec *codec, uint32_t flags,
 		const void *caps, size_t caps_size, uint32_t id, uint32_t idx,
 		struct spa_pod_builder *b, struct spa_pod **param)
 {
@@ -284,7 +284,7 @@ static int string_to_eqmid(const char * eqmid)
 		return LDACBT_EQMID_AUTO;
 }
 
-static void *codec_init_props(const struct a2dp_codec *codec, const struct spa_dict *settings)
+static void *codec_init_props(const struct a2dp_codec *codec, uint32_t flags, const struct spa_dict *settings)
 {
 	struct props *p = calloc(1, sizeof(struct props));
 	const char *str;
@@ -469,10 +469,10 @@ static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
 error_errno:
 	res = -errno;
 error:
-	if (this->ldac)
+	if (this && this->ldac)
 		ldacBT_free_handle(this->ldac);
 #ifdef ENABLE_LDAC_ABR
-	if (this->ldac_abr)
+	if (this && this->ldac_abr)
 		ldac_ABR_free_handle(this->ldac_abr);
 #endif
 	free(this);

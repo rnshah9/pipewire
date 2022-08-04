@@ -27,7 +27,7 @@ context.properties = {
 
     ## Properties for the DSP configuration.
     #default.clock.rate          = 48000
-    #default.clock.allowed-rates = [ 44100 48000 ]
+    #default.clock.allowed-rates = [ 48000 ]
     #default.clock.quantum       = 1024
     #default.clock.min-quantum   = 32
     #default.clock.max-quantum   = 2048
@@ -212,6 +212,7 @@ context.objects = [
             #channelmix.stereo-widen = 0.0
             #channelmix.hilbert-taps = 0
             channelmix.disable     = true
+            #dither.noise = 0
             #node.param.Props      = {
             #    params = [
             #        audio.channels 6
@@ -220,6 +221,7 @@ context.objects = [
             adapter.auto-port-config = {
                 mode = dsp
                 monitor = false
+                control = false
                 position = unknown   # aux, preserve
             }
             #node.param.PortConfig    = {
@@ -272,6 +274,7 @@ context.objects = [
             #channelmix.stereo-widen = 0.0
             #channelmix.hilbert-taps = 0
             channelmix.disable     = true
+            #dither.noise = 0
             #node.param.Props      = {
             #    params = [
             #        audio.format  S16
@@ -280,6 +283,7 @@ context.objects = [
             adapter.auto-port-config = {
                 mode = dsp
                 monitor = false
+                control = false
                 position = unknown   # aux, preserve
             }
             #node.param.PortConfig    = {

@@ -22,19 +22,23 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include "config.h"
+
 #include <unistd.h>
 #include <errno.h>
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
 #include <ctype.h>
-#ifndef __FreeBSD__
+#if !defined(__FreeBSD__) && !defined(__MidnightBSD__)
 #include <alloca.h>
 #endif
 #include <getopt.h>
 #include <fnmatch.h>
+#ifdef HAVE_READLINE
 #include <readline/readline.h>
 #include <readline/history.h>
+#endif
 #include <locale.h>
 
 #if !defined(FNM_EXTMATCH)
@@ -307,7 +311,12 @@ static void on_core_info(void *_data, const struct pw_core_info *info)
 static void set_prompt(struct remote_data *rd)
 {
 	snprintf(prompt, sizeof(prompt), "%s>> ", rd->name);
+#ifdef HAVE_READLINE
 	rl_set_prompt(prompt);
+#else
+	printf("%s", prompt);
+	fflush(stdout);
+#endif
 }
 
 static void on_core_done(void *_data, uint32_t id, int seq)
@@ -3040,18 +3049,20 @@ static bool parse(struct data *data, char *buf, char **error)
 }
 
 /* We need a global variable, readline doesn't have a closure arg */
-static struct data *readline_dataptr;
+static struct data *input_dataptr;
 
-static void readline_process_line(char *line)
+static void input_process_line(char *line)
 {
-	struct data *d = readline_dataptr;
+	struct data *d = input_dataptr;
 	char *error;
 
 	if (!line)
 		line = strdup("quit");
 
 	if (line[0] != '\0') {
+#ifdef HAVE_READLINE
 		add_history(line);
+#endif
 		if (!parse(d, line, &error)) {
 			fprintf(stderr, "Error: \"%s\"\n", error);
 			free(error);
@@ -3065,8 +3076,21 @@ static void do_input(void *data, int fd, uint32_t mask)
 	struct data *d = data;
 
 	if (mask & SPA_IO_IN) {
-		readline_dataptr = d;
+		input_dataptr = d;
+#ifdef HAVE_READLINE
 		rl_callback_read_char();
+#else
+		{
+			char *line = NULL;
+			size_t s = 0;
+
+			if (getline(&line, &s, stdin) < 0) {
+				free(line);
+				line = NULL;
+			}
+			input_process_line(line);
+		}
+#endif
 
 		if (d->current == NULL)
 			pw_main_loop_quit(d->loop);
@@ -3078,6 +3102,7 @@ static void do_input(void *data, int fd, uint32_t mask)
 	}
 }
 
+#ifdef HAVE_READLINE
 static char *
 readline_match_command(const char *text, int state)
 {
@@ -3119,13 +3144,14 @@ readline_command_completion(const char *text, int start, int end)
 static void readline_init()
 {
 	rl_attempted_completion_function = readline_command_completion;
-	rl_callback_handler_install(">> ", readline_process_line);
+	rl_callback_handler_install(">> ", input_process_line);
 }
 
 static void readline_cleanup()
 {
 	rl_callback_handler_remove();
 }
+#endif
 
 static void do_quit_on_signal(void *data, int signal_number)
 {
@@ -3152,13 +3178,14 @@ int main(int argc, char *argv[])
 	struct pw_loop *l;
 	char *opt_remote = NULL;
 	char *error;
-	bool daemon = false;
+	bool daemon = false, monitor = false;
 	struct remote_data *rd;
 	static const struct option long_options[] = {
-		{ "help",	no_argument,		 NULL, 'h' },
-		{ "version",	no_argument,		 NULL, 'V' },
-		{ "daemon",	no_argument,		 NULL, 'd' },
-		{ "remote",	required_argument,	 NULL, 'r' },
+		{ "help",	no_argument,		NULL, 'h' },
+		{ "version",	no_argument,		NULL, 'V' },
+		{ "monitor",	no_argument,		NULL, 'm' },
+		{ "daemon",	no_argument,		NULL, 'd' },
+		{ "remote",	required_argument,	NULL, 'r' },
 		{ NULL,	0, NULL, 0}
 	};
 	int c, i;
@@ -3168,7 +3195,7 @@ int main(int argc, char *argv[])
 	setlocale(LC_ALL, "");
 	pw_init(&argc, &argv);
 
-	while ((c = getopt_long(argc, argv, "hVdr:", long_options, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "hVmdr:", long_options, NULL)) != -1) {
 		switch (c) {
 		case 'h':
 			show_help(&data, argv[0], false);
@@ -3183,6 +3210,9 @@ int main(int argc, char *argv[])
 			return 0;
 		case 'd':
 			daemon = true;
+			break;
+		case 'm':
+			monitor = true;
 			break;
 		case 'r':
 			opt_remote = optarg;
@@ -3228,13 +3258,17 @@ int main(int argc, char *argv[])
 		printf("Welcome to PipeWire version %s. Type 'help' for usage.\n",
 				pw_get_library_version());
 
+#ifdef HAVE_READLINE
 		readline_init();
+#endif
 
 		pw_loop_add_io(l, STDIN_FILENO, SPA_IO_IN|SPA_IO_HUP, false, do_input, &data);
 
 		pw_main_loop_run(data.loop);
 
+#ifdef HAVE_READLINE
 		readline_cleanup();
+#endif
 	} else {
 		char buf[4096], *p, *error;
 
@@ -3250,9 +3284,11 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "Error: \"%s\"\n", error);
 			free(error);
 		}
-		if (!data.quit && data.current) {
+		while (!data.quit && data.current) {
 			data.current->prompt_pending = pw_core_sync(data.current->core, 0, 0);
 			pw_main_loop_run(data.loop);
+			if (!monitor)
+				break;
 		}
 	}
 	spa_list_consume(rd, &data.remotes, link)

@@ -60,6 +60,8 @@ struct stream {
 	uint32_t id;		/* id of global */
 	uint32_t index;		/* index */
 
+	uint32_t peer_index;
+
 	struct impl *impl;
 	struct client *client;
 	enum stream_type type;
@@ -97,6 +99,7 @@ struct stream {
 	struct buffer_attr attr;
 	uint32_t frame_size;
 	uint32_t rate;
+	uint64_t lat_usec;
 
 	struct volume volume;
 	bool muted;
@@ -127,5 +130,6 @@ int stream_send_killed(struct stream *stream);
 int stream_send_started(struct stream *stream);
 int stream_send_request(struct stream *stream);
 int stream_update_minreq(struct stream *stream, uint32_t minreq);
+int stream_send_moved(struct stream *stream, uint32_t peer_index, const char *peer_name);
 
 #endif /* PULSER_SERVER_STREAM_H */

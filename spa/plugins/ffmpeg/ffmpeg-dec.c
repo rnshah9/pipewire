@@ -38,6 +38,8 @@
 #include <spa/param/video/format.h>
 #include <spa/pod/filter.h>
 
+#include "ffmpeg.h"
+
 #define IS_VALID_PORT(this,d,id)	((id) == 0)
 #define GET_IN_PORT(this,p)		(&this->in_ports[p])
 #define GET_OUT_PORT(this,p)		(&this->out_ports[p])
@@ -456,6 +458,20 @@ impl_get_interface(struct spa_handle *handle, const char *type, void **interface
 	return 0;
 }
 
+static int
+impl_clear(struct spa_handle *handle)
+{
+	spa_return_val_if_fail(handle != NULL, -EINVAL);
+
+	return 0;
+}
+
+size_t
+spa_ffmpeg_dec_get_size(const struct spa_handle_factory *factory, const struct spa_dict *params)
+{
+	return sizeof(struct impl);
+}
+
 int
 spa_ffmpeg_dec_init(struct spa_handle *handle,
 		    const struct spa_dict *info,
@@ -466,6 +482,7 @@ spa_ffmpeg_dec_init(struct spa_handle *handle,
 	struct port *port;
 
 	handle->get_interface = impl_get_interface;
+	handle->clear = impl_clear;
 
 	this = (struct impl *) handle;
 

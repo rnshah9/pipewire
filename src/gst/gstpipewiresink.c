@@ -62,6 +62,7 @@ enum
   PROP_PATH,
   PROP_TARGET_OBJECT,
   PROP_CLIENT_NAME,
+  PROP_CLIENT_PROPERTIES,
   PROP_STREAM_PROPERTIES,
   PROP_MODE,
   PROP_FD
@@ -122,8 +123,10 @@ gst_pipewire_sink_finalize (GObject * object)
 
   g_object_unref (pwsink->pool);
 
-  if (pwsink->properties)
-    gst_structure_free (pwsink->properties);
+  if (pwsink->stream_properties)
+    gst_structure_free (pwsink->stream_properties);
+  if (pwsink->client_properties)
+    gst_structure_free (pwsink->client_properties);
   g_free (pwsink->path);
   g_free (pwsink->target_object);
   g_free (pwsink->client_name);
@@ -180,6 +183,15 @@ gst_pipewire_sink_class_init (GstPipeWireSinkClass * klass)
                                                         "Client Name",
                                                         "The client name to use (NULL = default)",
                                                         NULL,
+                                                        G_PARAM_READWRITE |
+                                                        G_PARAM_STATIC_STRINGS));
+
+   g_object_class_install_property (gobject_class,
+                                    PROP_CLIENT_PROPERTIES,
+                                    g_param_spec_boxed ("client-properties",
+                                                        "Client properties",
+                                                        "List of PipeWire client properties",
+                                                        GST_TYPE_STRUCTURE,
                                                         G_PARAM_READWRITE |
                                                         G_PARAM_STATIC_STRINGS));
 
@@ -361,10 +373,17 @@ gst_pipewire_sink_set_property (GObject * object, guint prop_id,
       pwsink->client_name = g_value_dup_string (value);
       break;
 
+    case PROP_CLIENT_PROPERTIES:
+      if (pwsink->client_properties)
+        gst_structure_free (pwsink->client_properties);
+      pwsink->client_properties =
+          gst_structure_copy (gst_value_get_structure (value));
+      break;
+
     case PROP_STREAM_PROPERTIES:
-      if (pwsink->properties)
-        gst_structure_free (pwsink->properties);
-      pwsink->properties =
+      if (pwsink->stream_properties)
+        gst_structure_free (pwsink->stream_properties);
+      pwsink->stream_properties =
           gst_structure_copy (gst_value_get_structure (value));
       break;
 
@@ -401,8 +420,12 @@ gst_pipewire_sink_get_property (GObject * object, guint prop_id,
       g_value_set_string (value, pwsink->client_name);
       break;
 
+    case PROP_CLIENT_PROPERTIES:
+      gst_value_set_structure (value, pwsink->client_properties);
+      break;
+
     case PROP_STREAM_PROPERTIES:
-      gst_value_set_structure (value, pwsink->properties);
+      gst_value_set_structure (value, pwsink->stream_properties);
       break;
 
     case PROP_MODE:
@@ -466,7 +489,7 @@ do_send_buffer (GstPipeWireSink *pwsink, GstBuffer *buffer)
   for (i = 0; i < b->n_datas; i++) {
     struct spa_data *d = &b->datas[i];
     GstMemory *mem = gst_buffer_peek_memory (buffer, i);
-    d->chunk->offset = mem->offset - data->offset;
+    d->chunk->offset = mem->offset;
     d->chunk->size = mem->size;
   }
 
@@ -495,7 +518,10 @@ on_state_changed (void *data, enum pw_stream_state old, enum pw_stream_state sta
     case PW_STREAM_STATE_UNCONNECTED:
     case PW_STREAM_STATE_CONNECTING:
     case PW_STREAM_STATE_PAUSED:
+      break;
     case PW_STREAM_STATE_STREAMING:
+      if (pw_stream_is_driving (pwsink->stream))
+        pw_stream_trigger_process (pwsink->stream);
       break;
     case PW_STREAM_STATE_ERROR:
       GST_ELEMENT_ERROR (pwsink, RESOURCE, FAILED,
@@ -679,6 +705,9 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
   if (unref_buffer)
     gst_buffer_unref (buffer);
 
+  if (pw_stream_is_driving (pwsink->stream))
+    pw_stream_trigger_process (pwsink->stream);
+
 done_unlock:
   pw_thread_loop_unlock (pwsink->core->loop);
 done:
@@ -727,16 +756,17 @@ gst_pipewire_sink_start (GstBaseSink * basesink)
 
   pwsink->negotiated = FALSE;
 
+  pw_thread_loop_lock (pwsink->core->loop);
+
   props = pw_properties_new (NULL, NULL);
   if (pwsink->client_name) {
     pw_properties_set (props, PW_KEY_NODE_NAME, pwsink->client_name);
     pw_properties_set (props, PW_KEY_NODE_DESCRIPTION, pwsink->client_name);
   }
-  if (pwsink->properties) {
-    gst_structure_foreach (pwsink->properties, copy_properties, props);
+  if (pwsink->stream_properties) {
+    gst_structure_foreach (pwsink->stream_properties, copy_properties, props);
   }
 
-  pw_thread_loop_lock (pwsink->core->loop);
   if ((pwsink->stream = pw_stream_new (pwsink->core->core, pwsink->client_name, props)) == NULL)
     goto no_stream;
 
@@ -780,9 +810,23 @@ gst_pipewire_sink_stop (GstBaseSink * basesink)
 static gboolean
 gst_pipewire_sink_open (GstPipeWireSink * pwsink)
 {
+  struct pw_properties *props;
+
+  GST_DEBUG_OBJECT (pwsink, "open");
+
   pwsink->core = gst_pipewire_core_get(pwsink->fd);
   if (pwsink->core == NULL)
       goto connect_error;
+
+  pw_thread_loop_lock (pwsink->core->loop);
+
+  props = pw_properties_new (NULL, NULL);
+  if (pwsink->client_properties) {
+    gst_structure_foreach (pwsink->client_properties, copy_properties, props);
+    pw_core_update_properties (pwsink->core->core, &props->dict);
+  }
+  pw_properties_free(props);
+  pw_thread_loop_unlock (pwsink->core->loop);
 
   return TRUE;
 

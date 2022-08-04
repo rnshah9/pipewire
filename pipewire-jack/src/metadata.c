@@ -120,7 +120,7 @@ static jack_property_t *add_property(jack_description_t *desc, const char *key,
 
 	if (desc->property_cnt == desc->property_size) {
 		ns = desc->property_size > 0 ? desc->property_size * 2 : 8;
-		np = reallocarray(desc->properties, ns, sizeof(*prop));
+		np = pw_reallocarray(desc->properties, ns, sizeof(*prop));
 		if (np == NULL)
 			return NULL;
 		desc->property_size = ns;
@@ -210,7 +210,7 @@ static int update_property(struct client *c,
 	pthread_mutex_unlock(&globals.lock);
 
 	if (c->property_callback && changed > 0) {
-		pw_log_info("emit %lu %s", subject, key);
+		pw_log_info("emit %"PRIu64" %s", (uint64_t)subject, key);
 		c->property_callback(subject, key, change, c->property_arg);
 	}
 	return changed;

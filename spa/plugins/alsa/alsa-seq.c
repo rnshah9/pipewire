@@ -131,13 +131,19 @@ static int seq_close(struct seq_state *state, struct seq_conn *conn)
 static int init_stream(struct seq_state *state, enum spa_direction direction)
 {
 	struct seq_stream *stream = &state->streams[direction];
+	int res;
 	stream->direction = direction;
 	if (direction == SPA_DIRECTION_INPUT) {
 		stream->caps = SND_SEQ_PORT_CAP_SUBS_WRITE;
 	} else {
 		stream->caps = SND_SEQ_PORT_CAP_SUBS_READ;
 	}
-	snd_midi_event_new(MAX_EVENT_SIZE, &stream->codec);
+	if ((res = snd_midi_event_new(MAX_EVENT_SIZE, &stream->codec)) < 0) {
+		spa_log_error(state->log, "can make event decoder: %s",
+				snd_strerror(res));
+		return res;
+	}
+	snd_midi_event_no_status(stream->codec, 1);
 	memset(stream->ports, 0, sizeof(stream->ports));
 	return 0;
 }
@@ -145,7 +151,9 @@ static int init_stream(struct seq_state *state, enum spa_direction direction)
 static int uninit_stream(struct seq_state *state, enum spa_direction direction)
 {
 	struct seq_stream *stream = &state->streams[direction];
-	snd_midi_event_free(stream->codec);
+	if (stream->codec)
+		snd_midi_event_free(stream->codec);
+	stream->codec = NULL;
 	return 0;
 }
 
@@ -541,12 +549,6 @@ static int process_read(struct seq_state *state)
 		if ((size = snd_midi_event_decode(stream->codec, data, MAX_EVENT_SIZE, ev)) < 0) {
 			spa_log_warn(state->log, "decode failed: %s", snd_strerror(size));
 			continue;
-		}
-
-		/* fixup NoteOn with vel 0 */
-		if ((data[0] & 0xF0) == 0x90 && data[2] == 0x00) {
-			data[0] = 0x80 + (data[0] & 0x0F);
-			data[2] = 0x40;
 		}
 
 		/* queue_time is the estimated current time of the queue as calculated by

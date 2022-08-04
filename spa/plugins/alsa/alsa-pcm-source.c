@@ -319,7 +319,9 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 	case SPA_PARAM_ProcessLatency:
 	{
 		struct spa_process_latency_info info;
-		if ((res = spa_process_latency_parse(param, &info)) < 0)
+		if (param == NULL)
+			spa_zero(info);
+		else if ((res = spa_process_latency_parse(param, &info)) < 0)
 			return res;
 
 		handle_process_latency(this, &info);
@@ -564,7 +566,7 @@ static int port_set_format(void *object,
 			   uint32_t flags, const struct spa_pod *format)
 {
 	struct state *this = object;
-	int err;
+	int err = 0;
 
 	if (format == NULL) {
 		if (!this->have_format)
@@ -608,7 +610,7 @@ static int port_set_format(void *object,
 	}
 	emit_port_info(this, false);
 
-	return 0;
+	return err;
 }
 
 static int
@@ -631,7 +633,9 @@ impl_node_port_set_param(void *object,
 	case SPA_PARAM_Latency:
 	{
 		struct spa_latency_info info;
-		if ((res = spa_latency_parse(param, &info)) < 0)
+		if (param == NULL)
+			info = SPA_LATENCY_INFO(SPA_DIRECTION_REVERSE(direction));
+		else if ((res = spa_latency_parse(param, &info)) < 0)
 			return res;
 		if (direction == info.direction)
 			return -EINVAL;

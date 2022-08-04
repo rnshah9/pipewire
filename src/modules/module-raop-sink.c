@@ -101,7 +101,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 
 #define DEFAULT_FORMAT "S16"
 #define DEFAULT_RATE 44100
-#define DEFAULT_CHANNELS "2"
+#define DEFAULT_CHANNELS 2
 #define DEFAULT_POSITION "[ FL FR ]"
 
 #define DEFAULT_LATENCY (DEFAULT_RATE*2)
@@ -110,8 +110,8 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 			"[ node.name=<name of the nodes> ] "					\
 			"[ node.description=<description of the nodes> ] "			\
 			"[ audio.format=<format, default:"DEFAULT_FORMAT"> ] "			\
-			"[ audio.rate=<sample rate, default: 48000> ] "				\
-			"[ audio.channels=<number of channels, default:"DEFAULT_CHANNELS"> ] "	\
+			"[ audio.rate=<sample rate, default: "SPA_STRINGIFY(DEFAULT_RATE)"> ] "			\
+			"[ audio.channels=<number of channels, default:"SPA_STRINGIFY(DEFAULT_CHANNELS)"> ] "	\
 			"[ audio.position=<channel map, default:"DEFAULT_POSITION"> ] "		\
 			"[ stream.props=<properties> ] "
 
@@ -130,6 +130,7 @@ enum {
 enum {
 	CRYPTO_NONE,
 	CRYPTO_RSA,
+	CRYPTO_AUTH_SETUP,
 };
 enum {
 	CODEC_PCM,
@@ -257,7 +258,8 @@ static inline uint64_t ntp_now(int clockid)
 	return timespec_to_ntp(&now);
 }
 
-static int send_udp_sync_packet(struct impl *impl)
+static int send_udp_sync_packet(struct impl *impl,
+		struct sockaddr *dest_addr, socklen_t addrlen)
 {
 	uint32_t pkt[5];
 	uint32_t rtptime = impl->rtptime;
@@ -278,10 +280,11 @@ static int send_udp_sync_packet(struct impl *impl)
 	pw_log_debug("sync: delayed:%u now:%"PRIu64" rtptime:%u",
 			rtptime - delay, transmitted, rtptime);
 
-	return write(impl->control_fd, pkt, sizeof(pkt));
+	return sendto(impl->control_fd, pkt, sizeof(pkt), 0, dest_addr, addrlen);
 }
 
-static int send_udp_timing_packet(struct impl *impl, uint64_t remote, uint64_t received)
+static int send_udp_timing_packet(struct impl *impl, uint64_t remote, uint64_t received,
+		struct sockaddr *dest_addr, socklen_t addrlen)
 {
 	uint32_t pkt[8];
 	uint64_t transmitted;
@@ -299,7 +302,7 @@ static int send_udp_timing_packet(struct impl *impl, uint64_t remote, uint64_t r
 	pw_log_debug("sync: remote:%"PRIu64" received:%"PRIu64" transmitted:%"PRIu64,
 			remote, received, transmitted);
 
-	return write(impl->timing_fd, pkt, sizeof(pkt));
+	return sendto(impl->timing_fd, pkt, sizeof(pkt), 0, dest_addr, addrlen);
 }
 
 static int write_codec_pcm(void *dst, void *frames, uint32_t n_frames)
@@ -345,7 +348,7 @@ static int flush_to_udp_packet(struct impl *impl)
 	impl->sync++;
 	if (impl->first || impl->sync == impl->sync_period) {
 		impl->sync = 0;
-		send_udp_sync_packet(impl);
+		send_udp_sync_packet(impl, NULL, 0);
 	}
 	pkt[0] = htonl(0x80600000);
 	if (impl->first)
@@ -373,7 +376,7 @@ static int flush_to_udp_packet(struct impl *impl)
 	impl->seq = (impl->seq + 1) & 0xffff;
 
 	pw_log_debug("send %u", len + 12);
-	res = write(impl->server_fd, pkt, len + 12);
+	res = send(impl->server_fd, pkt, len + 12, 0);
 
 	impl->first = false;
 
@@ -417,7 +420,7 @@ static int flush_to_tcp_packet(struct impl *impl)
 	impl->seq = (impl->seq + 1) & 0xffff;
 
 	pw_log_debug("send %u", len + 16);
-	res = write(impl->server_fd, pkt, len + 16);
+	res = send(impl->server_fd, pkt, len + 16, 0);
 
 	impl->first = false;
 
@@ -430,7 +433,7 @@ static void playback_stream_process(void *d)
 	struct pw_buffer *buf;
 	struct spa_data *bd;
 	uint8_t *data;
-	uint32_t size;
+	uint32_t offs, size;
 
 	if ((buf = pw_stream_dequeue_buffer(impl->stream)) == NULL) {
 		pw_log_debug("out of buffers: %m");
@@ -438,8 +441,10 @@ static void playback_stream_process(void *d)
 	}
 
 	bd = &buf->buffer->datas[0];
-	data = SPA_PTROFF(bd->data, bd->chunk->offset, uint8_t);
-	size = bd->chunk->size;
+
+	offs = SPA_MIN(bd->chunk->offset, bd->maxsize);
+	size = SPA_MIN(bd->chunk->size, bd->maxsize - offs);
+	data = SPA_PTROFF(bd->data, offs, uint8_t);
 
 	while (size > 0 && impl->block_size > 0) {
 		uint32_t avail, to_fill;
@@ -591,9 +596,12 @@ on_timing_source_io(void *data, int fd, uint32_t mask)
 
 	if (mask & SPA_IO_IN) {
 		uint64_t remote, received;
+		struct sockaddr_storage sender;
+		socklen_t sender_size = sizeof(sender);
 
 		received = ntp_now(CLOCK_MONOTONIC);
-		bytes = read(impl->timing_fd, packet, sizeof(packet));
+		bytes = recvfrom(impl->timing_fd, packet, sizeof(packet), 0,
+				(struct sockaddr*)&sender, &sender_size);
 		if (bytes < 0) {
 			pw_log_debug("error reading timing packet: %m");
 			return;
@@ -607,7 +615,11 @@ on_timing_source_io(void *data, int fd, uint32_t mask)
 			return;
 
 		remote = ((uint64_t)ntohl(packet[6])) << 32 | ntohl(packet[7]);
-		send_udp_timing_packet(impl, remote, received);
+		if (send_udp_timing_packet(impl, remote, received,
+				(struct sockaddr *)&sender, sender_size) < 0) {
+			pw_log_warn("error sending timing packet");
+			return;
+		}
 	}
 }
 
@@ -831,10 +843,8 @@ static void rtsp_setup_reply(void *data, int status, const struct spa_dict *head
 			return;
 
 		ntp = ntp_now(CLOCK_MONOTONIC);
-		send_udp_timing_packet(impl, ntp, ntp);
+		send_udp_timing_packet(impl, ntp, ntp, NULL, 0);
 
-		impl->timing_source = pw_loop_add_io(impl->loop, impl->timing_fd,
-				SPA_IO_IN, false, on_timing_source_io, impl);
 		impl->control_source = pw_loop_add_io(impl->loop, impl->control_fd,
 				SPA_IO_IN, false, on_control_source_io, impl);
 
@@ -865,6 +875,9 @@ static int rtsp_do_setup(struct impl *impl)
 		impl->timing_fd = create_udp_socket(impl, &impl->timing_port);
 		if (impl->control_fd < 0 || impl->timing_fd < 0)
 			goto error;
+
+		impl->timing_source = pw_loop_add_io(impl->loop, impl->timing_fd,
+				SPA_IO_IN, false, on_timing_source_io, impl);
 
 		pw_properties_setf(impl->headers, "Transport",
 				"RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;"
@@ -986,7 +999,7 @@ static int rtsp_do_announce(struct impl *impl)
 	char iv[16*2];
 	int res, frames, i, ip_version;
 	char *sdp;
-        char local_ip[256];
+	char local_ip[256];
 
 	host = pw_properties_get(impl->props, "raop.hostname");
 
@@ -1042,6 +1055,32 @@ static int rtsp_do_announce(struct impl *impl)
 	res = pw_rtsp_client_send(impl->rtsp, "ANNOUNCE", &impl->headers->dict,
 			"application/sdp", sdp, rtsp_announce_reply, impl);
 	free(sdp);
+
+	return res;
+}
+
+static void rtsp_auth_setup_reply(void *data, int status, const struct spa_dict *headers)
+{
+	struct impl *impl = data;
+
+	pw_log_info("reply %d", status);
+
+	impl->encryption = CRYPTO_NONE;
+
+	rtsp_do_announce(impl);
+}
+
+static int rtsp_do_auth_setup(struct impl *impl)
+{
+	int res;
+
+	char output[] = 
+		"\x01"
+		"\x59\x02\xed\xe9\x0d\x4e\xf2\xbd\x4c\xb6\x8a\x63\x30\x03\x82\x07"
+		"\xa9\x4d\xbd\x50\xd8\xaa\x46\x5b\x5d\x8c\x01\x2a\x0c\x7e\x1d\x4e";
+
+	res = pw_rtsp_client_url_send(impl->rtsp, "/auth-setup", "POST", &impl->headers->dict,
+			"application/octet-stream", output, rtsp_auth_setup_reply, impl);
 
 	return res;
 }
@@ -1141,7 +1180,7 @@ static int rtsp_do_auth(struct impl *impl, const struct spa_dict *headers)
 				DEFAULT_USER_NAME, realm, nonce, resp);
 	}
 	else
-		return -EINVAL;
+		goto error;
 
 	pw_properties_setf(impl->headers, "Authorization", "%s %s",
 			tokens[0], auth);
@@ -1166,7 +1205,10 @@ static void rtsp_options_reply(void *data, int status, const struct spa_dict *he
 		rtsp_do_auth(impl, headers);
 		break;
 	case 200:
-		rtsp_do_announce(impl);
+		if (impl->encryption == CRYPTO_AUTH_SETUP)
+			rtsp_do_auth_setup(impl);
+		else
+			rtsp_do_announce(impl);
 		break;
 	}
 }
@@ -1482,58 +1524,59 @@ static void parse_position(struct spa_audio_info_raw *info, const char *val, siz
 	}
 }
 
-static int parse_audio_info(struct impl *impl)
+static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	struct pw_properties *props = impl->stream_props;
-	struct spa_audio_info_raw *info = &impl->info;
 	const char *str;
 
 	spa_zero(*info);
-
 	if ((str = pw_properties_get(props, PW_KEY_AUDIO_FORMAT)) == NULL)
 		str = DEFAULT_FORMAT;
 	info->format = format_from_name(str, strlen(str));
-	switch (info->format) {
-	case SPA_AUDIO_FORMAT_S8:
-	case SPA_AUDIO_FORMAT_U8:
-		impl->frame_size = 1;
-		break;
-	case SPA_AUDIO_FORMAT_S16:
-		impl->frame_size = 2;
-		break;
-	case SPA_AUDIO_FORMAT_S24:
-		impl->frame_size = 3;
-		break;
-	case SPA_AUDIO_FORMAT_S24_32:
-	case SPA_AUDIO_FORMAT_S32:
-	case SPA_AUDIO_FORMAT_F32:
-		impl->frame_size = 4;
-		break;
-	case SPA_AUDIO_FORMAT_F64:
-		impl->frame_size = 8;
-		break;
-	default:
-		pw_log_error("unsupported format '%s'", str);
-		return -EINVAL;
-	}
-	info->rate = pw_properties_get_uint32(props, PW_KEY_AUDIO_RATE, DEFAULT_RATE);
-	if (info->rate == 0) {
-		pw_log_error("invalid rate '%s'", str);
-		return -EINVAL;
-	}
-	if ((str = pw_properties_get(props, PW_KEY_AUDIO_CHANNELS)) == NULL)
-		str = DEFAULT_CHANNELS;
-	info->channels = atoi(str);
-	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) == NULL)
-		str = DEFAULT_POSITION;
-	parse_position(info, str, strlen(str));
-	if (info->channels == 0) {
-		pw_log_error("invalid channels '%s'", str);
-		return -EINVAL;
-	}
-	impl->frame_size *= info->channels;
 
-	return 0;
+	info->rate = pw_properties_get_uint32(props, PW_KEY_AUDIO_RATE, info->rate);
+	if (info->rate == 0)
+		info->rate = DEFAULT_RATE;
+
+	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
+	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
+	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
+		parse_position(info, str, strlen(str));
+	if (info->channels == 0)
+		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
+}
+
+static int calc_frame_size(struct spa_audio_info_raw *info)
+{
+	int res = info->channels;
+	switch (info->format) {
+	case SPA_AUDIO_FORMAT_U8:
+	case SPA_AUDIO_FORMAT_S8:
+	case SPA_AUDIO_FORMAT_ALAW:
+	case SPA_AUDIO_FORMAT_ULAW:
+		return res;
+	case SPA_AUDIO_FORMAT_S16:
+	case SPA_AUDIO_FORMAT_S16_OE:
+	case SPA_AUDIO_FORMAT_U16:
+		return res * 2;
+	case SPA_AUDIO_FORMAT_S24:
+	case SPA_AUDIO_FORMAT_S24_OE:
+	case SPA_AUDIO_FORMAT_U24:
+		return res * 3;
+	case SPA_AUDIO_FORMAT_S24_32:
+	case SPA_AUDIO_FORMAT_S24_32_OE:
+	case SPA_AUDIO_FORMAT_S32:
+	case SPA_AUDIO_FORMAT_S32_OE:
+	case SPA_AUDIO_FORMAT_U32:
+	case SPA_AUDIO_FORMAT_U32_OE:
+	case SPA_AUDIO_FORMAT_F32:
+	case SPA_AUDIO_FORMAT_F32_OE:
+		return res * 4;
+	case SPA_AUDIO_FORMAT_F64:
+	case SPA_AUDIO_FORMAT_F64_OE:
+		return res * 8;
+	default:
+		return 0;
+	}
 }
 
 static void copy_props(struct impl *impl, struct pw_properties *props, const char *key)
@@ -1617,8 +1660,13 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
 	copy_props(impl, props, PW_KEY_MEDIA_CLASS);
 
-	if ((res = parse_audio_info(impl)) < 0) {
-		pw_log_error( "can't parse audio format");
+	parse_audio_info(impl->stream_props, &impl->info);
+
+	impl->frame_size = calc_frame_size(&impl->info);
+	if (impl->frame_size == 0) {
+		pw_log_error("unsupported audio format:%d channels:%d",
+				impl->info.format, impl->info.channels);
+		res = -EINVAL;
 		goto error;
 	}
 
@@ -1630,6 +1678,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		impl->protocol = PROTO_TCP;
 	else {
 		pw_log_error( "can't handle transport %s", str);
+		res = -EINVAL;
 		goto error;
 	}
 
@@ -1639,8 +1688,11 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		impl->encryption = CRYPTO_NONE;
 	else if (spa_streq(str, "RSA"))
 		impl->encryption = CRYPTO_RSA;
+	else if (spa_streq(str, "auth_setup"))
+		impl->encryption = CRYPTO_AUTH_SETUP;
 	else {
 		pw_log_error( "can't handle encryption type %s", str);
+		res = -EINVAL;
 		goto error;
 	}
 
@@ -1650,6 +1702,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		impl->codec = CODEC_PCM;
 	else {
 		pw_log_error( "can't handle codec type %s", str);
+		res = -EINVAL;
 		goto error;
 	}
 	str = pw_properties_get(props, "raop.password");

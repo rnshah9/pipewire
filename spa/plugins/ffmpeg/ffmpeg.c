@@ -30,10 +30,7 @@
 
 #include <libavcodec/avcodec.h>
 
-int spa_ffmpeg_dec_init(struct spa_handle *handle, const struct spa_dict *info,
-			const struct spa_support *support, uint32_t n_support);
-int spa_ffmpeg_enc_init(struct spa_handle *handle, const struct spa_dict *info,
-			const struct spa_support *support, uint32_t n_support);
+#include "ffmpeg.h"
 
 static int
 ffmpeg_dec_init(const struct spa_handle_factory *factory,
@@ -130,8 +127,12 @@ static const AVCodec *find_codec_by_index(uint32_t index)
 SPA_EXPORT
 int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t *index)
 {
-	static struct spa_handle_factory f;
 	static char name[128];
+	static struct spa_handle_factory f = {
+		SPA_VERSION_HANDLE_FACTORY,
+		.name = name,
+		.enum_interface_info = ffmpeg_enum_interface_info,
+	};
 
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 10, 100)
 	avcodec_register_all();
@@ -144,15 +145,13 @@ int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t 
 
 	if (av_codec_is_encoder(c)) {
 		snprintf(name, sizeof(name), "encoder.%s", c->name);
+		f.get_size = spa_ffmpeg_enc_get_size;
 		f.init = ffmpeg_enc_init;
 	} else {
 		snprintf(name, sizeof(name), "decoder.%s", c->name);
+		f.get_size = spa_ffmpeg_dec_get_size;
 		f.init = ffmpeg_dec_init;
 	}
-
-	f.name = name;
-	f.info = NULL;
-	f.enum_interface_info = ffmpeg_enum_interface_info;
 
 	*factory = &f;
 	(*index)++;

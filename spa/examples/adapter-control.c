@@ -62,7 +62,9 @@
 
 static SPA_LOG_IMPL(default_log);
 
-#define MIN_LATENCY	  1024
+#define MIN_LATENCY	    1024
+#define CONTROL_BUFFER_SIZE 32768
+
 
 struct buffer {
 	struct spa_buffer buffer;
@@ -95,10 +97,19 @@ struct data {
 	struct spa_node *sink_follower_node;  // alsa-pcm-sink
 	struct spa_node *sink_node;  // adapter for alsa-pcm-sink
 
+	struct spa_io_position position;
 	struct spa_io_buffers source_sink_io[1];
 	struct spa_buffer *source_buffers[1];
 	struct buffer source_buffer[1];
-	uint8_t ctrl[1024];
+
+	struct spa_io_buffers control_io;
+	struct spa_buffer *control_buffers[1];
+	struct buffer control_buffer[1];
+
+	int buffer_count;
+	bool start_fade_in;
+	double volume_accum;
+	uint32_t volume_offs;
 
 	bool running;
 	pthread_t thread;
@@ -167,6 +178,11 @@ int init_data(struct data *data)
 	if ((str = getenv("SPA_PLUGIN_DIR")) == NULL)
 		str = PLUGINDIR;
 	data->plugin_dir = str;
+
+	/* start not doing fade-in */
+	data->start_fade_in = true;
+	data->volume_accum = 0.0;
+	data->volume_offs = 0;
 
 	/* init the graph */
 	spa_graph_init(&data->graph, &data->graph_state);
@@ -274,29 +290,104 @@ exit_cleanup:
 	return res;
 }
 
+static int fade_in(struct data *data)
+{
+	struct spa_pod_builder b;
+	struct spa_pod_frame f[1];
+	void *buffer = data->control_buffer->datas[0].data;
+	uint32_t buffer_size = data->control_buffer->datas[0].maxsize;
+	data->control_buffer->datas[0].chunk[0].size = buffer_size;
+
+	printf ("fading in\n");
+
+	spa_pod_builder_init(&b, buffer, buffer_size);
+	spa_pod_builder_push_sequence(&b, &f[0], 0);
+	data->volume_offs = 0;
+	do {
+		spa_pod_builder_control(&b, data->volume_offs, SPA_CONTROL_Properties);
+			spa_pod_builder_add_object(&b,
+			SPA_TYPE_OBJECT_Props, 0,
+			SPA_PROP_volume, SPA_POD_Float(data->volume_accum));
+		data->volume_accum += 0.003;
+		data->volume_offs += 200;
+	} while (data->volume_accum < 1.0);
+	spa_pod_builder_pop(&b, &f[0]);
+
+	return 0;
+}
+
+static int fade_out(struct data *data)
+{
+	struct spa_pod_builder b;
+	struct spa_pod_frame f[1];
+	void *buffer = data->control_buffer->datas[0].data;
+	uint32_t buffer_size = data->control_buffer->datas[0].maxsize;
+	data->control_buffer->datas[0].chunk[0].size = buffer_size;
+
+	printf ("fading out\n");
+
+	spa_pod_builder_init(&b, buffer, buffer_size);
+	spa_pod_builder_push_sequence(&b, &f[0], 0);
+	data->volume_offs = 200;
+	do {
+		spa_pod_builder_control(&b, data->volume_offs, SPA_CONTROL_Properties);
+			spa_pod_builder_add_object(&b,
+			SPA_TYPE_OBJECT_Props, 0,
+			SPA_PROP_volume, SPA_POD_Float(data->volume_accum));
+		data->volume_accum -= 0.003;
+		data->volume_offs += 200;
+	} while (data->volume_accum > 0.0);
+	spa_pod_builder_pop(&b, &f[0]);
+
+	return 0;
+}
+
+static void do_fade(struct data *data)
+{
+	switch (data->control_io.status) {
+	case SPA_STATUS_OK:
+	case SPA_STATUS_NEED_DATA:
+		break;
+	case SPA_STATUS_HAVE_DATA:
+	case SPA_STATUS_STOPPED:
+	default:
+		return;
+	}
+
+	/* fade */
+	if (data->start_fade_in)
+		fade_in(data);
+	else
+		fade_out(data);
+
+	data->control_io.status = SPA_STATUS_HAVE_DATA;
+	data->control_io.buffer_id = 0;
+
+	/* alternate */
+	data->start_fade_in = !data->start_fade_in;
+}
+
 static int on_sink_node_ready(void *_data, int status)
 {
 	struct data *data = _data;
+
+	/* only do fade in/out when buffer count is 0 */
+	if (data->buffer_count == 0)
+		  do_fade(data);
+
+	/* update buffer count */
+	data->buffer_count++;
+	if (data->buffer_count > 64)
+		  data->buffer_count = 0;
 
 	spa_graph_node_process(&data->graph_source_node);
 	spa_graph_node_process(&data->graph_sink_node);
 	return 0;
 }
 
-static int
-on_sink_node_reuse_buffer(void *_data, uint32_t port_id, uint32_t buffer_id)
-{
-	struct data *data = _data;
-
-	printf ("reuse_buffer: port_id=%d\n", port_id);
-	data->source_sink_io[0].buffer_id = buffer_id;
-	return 0;
-}
-
 static const struct spa_node_callbacks sink_node_callbacks = {
 	SPA_VERSION_NODE_CALLBACKS,
 	.ready = on_sink_node_ready,
-	.reuse_buffer = on_sink_node_reuse_buffer
 };
 
 static int make_nodes(struct data *data, const char *device)
@@ -306,15 +397,17 @@ static int make_nodes(struct data *data, const char *device)
 	struct spa_pod_builder b = { 0 };
 	uint8_t buffer[1024];
 	char value[32];
-	struct spa_dict_item items[1];
+	struct spa_dict_item items[2];
 	struct spa_audio_info_raw info;
 	struct spa_pod *param;
 
+	items[0] = SPA_DICT_ITEM_INIT("clock.quantum-limit", "8192");
+
 	/* make the source node (audiotestsrc) */
 	if ((res = make_node(data, &data->source_follower_node,
-				   "audiotestsrc/libspa-audiotestsrc.so",
-				   "audiotestsrc",
-				   NULL)) < 0) {
+					"audiotestsrc/libspa-audiotestsrc.so",
+					"audiotestsrc",
+					&SPA_DICT_INIT(items, 1))) < 0) {
 		printf("can't create source follower node (audiotestsrc): %d\n", res);
 		return res;
 	}
@@ -335,11 +428,11 @@ static int make_nodes(struct data *data, const char *device)
 
 	/* make the sink adapter node */
 	snprintf(value, sizeof(value), "pointer:%p", data->source_follower_node);
-	items[0] = SPA_DICT_ITEM_INIT("audio.adapt.follower", value);
+	items[1] = SPA_DICT_ITEM_INIT("audio.adapt.follower", value);
 	if ((res = make_node(data, &data->source_node,
-			     "audioconvert/libspa-audioconvert.so",
-			     SPA_NAME_AUDIO_ADAPT,
-			     &SPA_DICT_INIT(items, 1))) < 0) {
+					"audioconvert/libspa-audioconvert.so",
+					SPA_NAME_AUDIO_ADAPT,
+					&SPA_DICT_INIT(items, 2))) < 0) {
 		printf("can't create source adapter node: %d\n", res);
 		return res;
 	}
@@ -376,20 +469,20 @@ static int make_nodes(struct data *data, const char *device)
 
 	/* make the sink follower node (alsa-pcm-sink) */
 	if ((res = make_node(data, &data->sink_follower_node,
-				   "alsa/libspa-alsa.so",
-				   SPA_NAME_API_ALSA_PCM_SINK,
-				   NULL)) < 0) {
+					"alsa/libspa-alsa.so",
+					SPA_NAME_API_ALSA_PCM_SINK,
+					&SPA_DICT_INIT(items, 1))) < 0) {
 		printf("can't create sink follower node (alsa-pcm-sink): %d\n", res);
 		return res;
 	}
 
 	/* make the sink adapter node */
 	snprintf(value, sizeof(value), "pointer:%p", data->sink_follower_node);
-	items[0] = SPA_DICT_ITEM_INIT("audio.adapt.follower", value);
+	items[1] = SPA_DICT_ITEM_INIT("audio.adapt.follower", value);
 	if ((res = make_node(data, &data->sink_node,
-			     "audioconvert/libspa-audioconvert.so",
-			     SPA_NAME_AUDIO_ADAPT,
-			     &SPA_DICT_INIT(items, 1))) < 0) {
+					"audioconvert/libspa-audioconvert.so",
+					SPA_NAME_AUDIO_ADAPT,
+					&SPA_DICT_INIT(items, 2))) < 0) {
 		printf("can't create sink adapter node: %d\n", res);
 		return res;
 	}
@@ -420,6 +513,7 @@ static int make_nodes(struct data *data, const char *device)
 		SPA_TYPE_OBJECT_ParamPortConfig,	SPA_PARAM_PortConfig,
 		SPA_PARAM_PORT_CONFIG_direction,	SPA_POD_Id(SPA_DIRECTION_INPUT),
 		SPA_PARAM_PORT_CONFIG_mode,		SPA_POD_Id(SPA_PARAM_PORT_CONFIG_MODE_dsp),
+		SPA_PARAM_PORT_CONFIG_control,		SPA_POD_Bool(true),
 		SPA_PARAM_PORT_CONFIG_format,		SPA_POD_Pod(param));
 	if ((res = spa_node_set_param(data->sink_node, SPA_PARAM_PortConfig, 0, param) < 0)) {
 		printf("can't setup sink node %d\n", res);
@@ -440,6 +534,42 @@ static int make_nodes(struct data *data, const char *device)
 			  SPA_IO_Buffers,
 			  &data->source_sink_io[0], sizeof(data->source_sink_io[0]))) < 0) {
 		printf("can't set io buffers on port 0 of sink node: %d\n", res);
+		return res;
+	}
+	/* set io position and clock on source and sink nodes */
+	data->position.clock.rate = SPA_FRACTION(1, 48000);
+	data->position.clock.duration = 1024;
+	if ((res = spa_node_set_io(data->source_node,
+			SPA_IO_Position,
+			&data->position, sizeof(data->position))) < 0) {
+		printf("can't set io position on source node: %d\n", res);
+		return res;
+	}
+	if ((res = spa_node_set_io(data->sink_node,
+			  SPA_IO_Position,
+			  &data->position, sizeof(data->position))) < 0) {
+		printf("can't set io position on sink node: %d\n", res);
+		return res;
+	}
+	if ((res = spa_node_set_io(data->source_node,
+			SPA_IO_Clock,
+			&data->position.clock, sizeof(data->position.clock))) < 0) {
+		printf("can't set io clock on source node: %d\n", res);
+		return res;
+	}
+	if ((res = spa_node_set_io(data->sink_node,
+			  SPA_IO_Clock,
+			  &data->position.clock, sizeof(data->position.clock))) < 0) {
+		printf("can't set io clock on sink node: %d\n", res);
+		return res;
+	}
+
+	/* set io buffers on control port of sink node */
+	if ((res = spa_node_port_set_io(data->sink_node,
+			SPA_DIRECTION_INPUT, 1,
+			SPA_IO_Buffers,
+			&data->control_io, sizeof(data->control_io))) < 0) {
+		printf("can't set io buffers on control port 1 of sink node\n");
 		return res;
 	}
 
@@ -508,17 +638,6 @@ static int negotiate_formats(struct data *data)
 	uint32_t state = 0;
 	size_t buffer_size = 1024;
 
-	/* get the source follower node buffer size */
-	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	if (spa_node_port_enum_params_sync(data->source_follower_node,
-			SPA_DIRECTION_OUTPUT, 0,
-			SPA_PARAM_Buffers, &state, filter, &param, &b) != 1)
-		return -ENOTSUP;
-	spa_pod_fixate(param);
-	if ((res = spa_pod_parse_object(param, SPA_TYPE_OBJECT_ParamBuffers, NULL,
-		SPA_PARAM_BUFFERS_size, SPA_POD_Int(&buffer_size))) < 0)
-		return res;
-
 	/* set the sink and source formats */
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
 	param = spa_format_audio_dsp_build(&b, 0,
@@ -531,6 +650,26 @@ static int negotiate_formats(struct data *data)
 			SPA_DIRECTION_INPUT, 0, SPA_PARAM_Format, 0, param)) < 0)
 		return res;
 
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	param = spa_pod_builder_add_object(&b,
+			SPA_TYPE_OBJECT_Format, SPA_PARAM_Format,
+			SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_application),
+			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control));
+	if ((res = spa_node_port_set_param(data->sink_node,
+			SPA_DIRECTION_INPUT, 1, SPA_PARAM_Format, 0, param)) < 0)
+		return res;
+
+	/* get the source node buffer size */
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	if ((res = spa_node_port_enum_params_sync(data->source_node,
+			SPA_DIRECTION_OUTPUT, 0,
+			SPA_PARAM_Buffers, &state, filter, &param, &b)) != 1)
+		return res ? res : -ENOTSUP;
+	spa_pod_fixate(param);
+	if ((res = spa_pod_parse_object(param, SPA_TYPE_OBJECT_ParamBuffers, NULL,
+		SPA_PARAM_BUFFERS_size, SPA_POD_Int(&buffer_size))) < 0)
+		return res;
+
 	/* use buffers on the source and sink */
 	init_buffer(data, data->source_buffers, data->source_buffer, 1, buffer_size);
 	if ((res = spa_node_port_use_buffers(data->source_node,
@@ -538,6 +677,12 @@ static int negotiate_formats(struct data *data)
 		return res;
 	if ((res = spa_node_port_use_buffers(data->sink_node,
 		SPA_DIRECTION_INPUT, 0, 0, data->source_buffers, 1)) < 0)
+		return res;
+
+	/* Set the control buffers */
+	init_buffer(data, data->control_buffers, data->control_buffer, 1, CONTROL_BUFFER_SIZE);
+	if ((res = spa_node_port_use_buffers(data->sink_node,
+		SPA_DIRECTION_INPUT, 1, 0, data->control_buffers, 1)) < 0)
 		return res;
 
 	return 0;

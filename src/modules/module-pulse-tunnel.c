@@ -68,8 +68,8 @@
  *
  * ## Module Options
  *
- * - `tunnel.mode`: the desired tunnel to create, must be `capture` or `playback`.
- *                  (Default `playback`)
+ * - `tunnel.mode`: the desired tunnel to create, must be `source` or `sink`.
+ *                  (Default `sink`)
  * - `pulse.server.address`: the address of the PulseAudio server to tunnel to.
  * - `pulse.latency`: the latency to end-to-end latency in milliseconds to
  *                    maintain (Default 200ms).
@@ -80,6 +80,7 @@
  * Options with well-known behavior.
  *
  * - \ref PW_KEY_REMOTE_NAME
+ * - \ref PW_KEY_AUDIO_FORMAT
  * - \ref PW_KEY_AUDIO_RATE
  * - \ref PW_KEY_AUDIO_CHANNELS
  * - \ref SPA_KEY_AUDIO_POSITION
@@ -89,7 +90,7 @@
  * - \ref PW_KEY_NODE_GROUP
  * - \ref PW_KEY_NODE_VIRTUAL
  * - \ref PW_KEY_MEDIA_CLASS
- * - \ref PW_KEY_NODE_TARGET to specify the remote name or id to link to
+ * - \ref PW_KEY_TARGET_OBJECT to specify the remote node.name or serial.id to link to
  *
  * ## Example configuration of a virtual sink
  *
@@ -97,13 +98,13 @@
  * context.modules = [
  * {   name = libpipewire-module-pulse-tunnel
  *     args = {
- *         tunnel.mode = playback
+ *         tunnel.mode = sink
  *         # Set the remote address to tunnel to
  *         pulse.server.address = "tcp:192.168.1.126"
  *         #audio.rate=<sample rate>
  *         #audio.channels=<number of channels>
  *         #audio.position=<channel map>
- *         #node.target=<remote target node>
+ *         #target.object=<remote target name>
  *         stream.props = {
  *             # extra sink properties
  *         }
@@ -118,17 +119,23 @@
 PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
+#define DEFAULT_FORMAT "S16"
+#define DEFAULT_RATE 48000
+#define DEFAULT_CHANNELS 2
+#define DEFAULT_POSITION "[ FL FR ]"
+
 #define MODULE_USAGE	"[ remote.name=<remote> ] "				\
 			"[ node.latency=<latency as fraction> ] "		\
 			"[ node.name=<name of the nodes> ] "			\
 			"[ node.description=<description of the nodes> ] "	\
 			"[ node.target=<remote node target name> ] "		\
+			"[ audio.format=<sample format> ] "			\
 			"[ audio.rate=<sample rate> ] "				\
 			"[ audio.channels=<number of channels> ] "		\
 			"[ audio.position=<channel map> ] "			\
 			"pulse.server.address=<address> "			\
 			"pulse.latency=<latency in msec> "			\
-			"[ tunnel.mode=capture|playback "			\
+			"[ tunnel.mode=source|sink "				\
 			"[ stream.props=<properties> ] "
 
 
@@ -147,8 +154,8 @@ static const struct spa_dict_item module_props[] = {
 struct impl {
 	struct pw_context *context;
 
-#define MODE_PLAYBACK	0
-#define MODE_CAPTURE	1
+#define MODE_SINK	0
+#define MODE_SOURCE	1
 	uint32_t mode;
 	struct pw_properties *props;
 
@@ -193,7 +200,7 @@ static void cork_stream(struct impl *impl, bool cork)
 	pa_threaded_mainloop_lock(impl->pa_mainloop);
 
 	pw_log_debug("corking: %d", cork);
-	if (cork && impl->mode == MODE_PLAYBACK) {
+	if (cork && impl->mode == MODE_SINK) {
 		/* When the sink becomes suspended (which is the only case where we
 		 * cork the stream), we don't want to keep any old data around, because
 		 * the old data is most likely unrelated to the audio that will be
@@ -246,7 +253,7 @@ static void playback_stream_process(void *d)
 	struct pw_buffer *buf;
 	struct spa_data *bd;
 	int32_t filled;
-	uint32_t write_index, size;
+	uint32_t write_index, offs, size;
 
 	if ((buf = pw_stream_dequeue_buffer(impl->stream)) == NULL) {
 		pw_log_debug("out of buffers: %m");
@@ -254,7 +261,9 @@ static void playback_stream_process(void *d)
 	}
 
 	bd = &buf->buffer->datas[0];
-	size = SPA_MIN(bd->chunk->size, RINGBUFFER_SIZE);
+	offs = SPA_MIN(bd->chunk->offset, bd->maxsize);
+	size = SPA_MIN(bd->chunk->size, bd->maxsize - offs);
+	size = SPA_MIN(size, RINGBUFFER_SIZE);
 
 	filled = spa_ringbuffer_get_write_index(&impl->ring, &write_index);
 
@@ -281,8 +290,8 @@ static void playback_stream_process(void *d)
 	}
 	spa_ringbuffer_write_data(&impl->ring,
 				impl->buffer, RINGBUFFER_SIZE,
-                                write_index & RINGBUFFER_MASK,
-                                SPA_PTROFF(bd->data, bd->chunk->offset, void),
+				write_index & RINGBUFFER_MASK,
+				SPA_PTROFF(bd->data, offs, void),
 				size);
 	write_index += size;
 	spa_ringbuffer_write_update(&impl->ring, write_index);
@@ -376,7 +385,7 @@ static int create_stream(struct impl *impl)
 	if (impl->stream == NULL)
 		return -errno;
 
-	if (impl->mode == MODE_CAPTURE) {
+	if (impl->mode == MODE_SOURCE) {
 		pw_stream_add_listener(impl->stream,
 				&impl->stream_listener,
 				&capture_stream_events, impl);
@@ -392,14 +401,14 @@ static int create_stream(struct impl *impl)
 			SPA_PARAM_EnumFormat, &impl->info);
 
 	spa_zero(latency);
-	latency.direction = impl->mode == MODE_CAPTURE ? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT;
+	latency.direction = impl->mode == MODE_SOURCE ? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT;
 	latency.min_ns = latency.max_ns = impl->latency_msec * SPA_NSEC_PER_MSEC;
 
 	params[n_params++] = spa_latency_build(&b,
 			SPA_PARAM_Latency, &latency);
 
 	if ((res = pw_stream_connect(impl->stream,
-			impl->mode == MODE_CAPTURE ? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT,
+			impl->mode == MODE_SOURCE ? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT,
 			PW_ID_ANY,
 			PW_STREAM_FLAG_AUTOCONNECT |
 			PW_STREAM_FLAG_MAP_BUFFERS |
@@ -651,7 +660,9 @@ static int create_pulse_stream(struct impl *impl)
 	pa_stream_set_overflow_callback(impl->pa_stream, stream_overflow_cb, impl);
 	pa_stream_set_latency_update_callback(impl->pa_stream, stream_latency_update_cb, impl);
 
-	remote_node_target = pw_properties_get(impl->props, PW_KEY_NODE_TARGET);
+	remote_node_target = pw_properties_get(impl->props, PW_KEY_TARGET_OBJECT);
+	if (remote_node_target == NULL)
+		remote_node_target = pw_properties_get(impl->props, PW_KEY_NODE_TARGET);
 
 	bufferattr.fragsize = (uint32_t) -1;
 	bufferattr.minreq = (uint32_t) -1;
@@ -665,7 +676,7 @@ static int create_pulse_stream(struct impl *impl)
 	/* half in our buffer, half in the network + remote */
 	impl->target_buffer = latency_bytes / 2;
 
-	if (impl->mode == MODE_CAPTURE) {
+	if (impl->mode == MODE_SOURCE) {
 		bufferattr.fragsize = latency_bytes / 2;
 
 		res = pa_stream_connect_record(impl->pa_stream,
@@ -821,28 +832,25 @@ static inline uint32_t format_from_name(const char *name, size_t len)
 	return SPA_AUDIO_FORMAT_UNKNOWN;
 }
 
-static void parse_audio_info(struct pw_properties *props, struct spa_audio_info_raw *info)
+static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
 	const char *str;
 
-	*info = SPA_AUDIO_INFO_RAW_INIT(
-			.rate = 48000,
-			.channels = 2,
-			.format = SPA_AUDIO_FORMAT_S16);
-
-	if ((str = pw_properties_get(props, PW_KEY_AUDIO_FORMAT)) != NULL) {
-		uint32_t id;
-
-		id = format_from_name(str, strlen(str));
-		if (id != SPA_AUDIO_FORMAT_UNKNOWN)
-			info->format = id;
-	}
+	spa_zero(*info);
+	if ((str = pw_properties_get(props, PW_KEY_AUDIO_FORMAT)) == NULL)
+		str = DEFAULT_FORMAT;
+	info->format = format_from_name(str, strlen(str));
 
 	info->rate = pw_properties_get_uint32(props, PW_KEY_AUDIO_RATE, info->rate);
+	if (info->rate == 0)
+		info->rate = DEFAULT_RATE;
+
 	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
+	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
 	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
 		parse_position(info, str, strlen(str));
-
+	if (info->channels == 0)
+		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
 }
 
 static int calc_frame_size(struct spa_audio_info_raw *info)
@@ -931,10 +939,10 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	spa_dll_init(&impl->dll);
 
 	if ((str = pw_properties_get(props, "tunnel.mode")) != NULL) {
-		if (spa_streq(str, "capture")) {
-			impl->mode = MODE_CAPTURE;
-		} else if (spa_streq(str, "playback")) {
-			impl->mode = MODE_PLAYBACK;
+		if (spa_streq(str, "source")) {
+			impl->mode = MODE_SOURCE;
+		} else if (spa_streq(str, "sink")) {
+			impl->mode = MODE_SINK;
 		} else {
 			pw_log_error("invalid tunnel.mode '%s'", str);
 			res = -EINVAL;
@@ -952,7 +960,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	if (pw_properties_get(props, PW_KEY_MEDIA_CLASS) == NULL)
 		pw_properties_set(props, PW_KEY_MEDIA_CLASS,
-				impl->mode == MODE_PLAYBACK ?
+				impl->mode == MODE_SINK ?
 					"Audio/Sink" : "Audio/Source");
 
 	if ((str = pw_properties_get(props, "stream.props")) != NULL)

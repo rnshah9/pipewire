@@ -46,6 +46,8 @@
 #include <pipewire/impl.h>
 #include <pipewire/private.h>
 
+#include "flatpak-utils.h"
+
 /** \page page_module_access PipeWire Module: Access
  *
  *
@@ -75,6 +77,9 @@
  *       on an external actor to update that property once permission is
  *       granted or rejected.
  *
+ * For connections from applications running inside Flatpak not mediated
+ * by a portal, the `access` module itself sets the `pipewire.access.portal.app_id`
+ * property to the Flatpak application ID.
  *
  * ## Module Options
  *
@@ -184,54 +189,6 @@ exit:
 	return res;
 }
 
-#if defined(__linux__)
-static int check_flatpak(struct pw_impl_client *client, int pid)
-{
-	char root_path[2048];
-	int root_fd, info_fd, res;
-	struct stat stat_buf;
-
-	sprintf(root_path, "/proc/%u/root", pid);
-	root_fd = openat (AT_FDCWD, root_path, O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC | O_NOCTTY);
-	if (root_fd == -1) {
-		res = -errno;
-		if (res == -EACCES) {
-			struct statfs buf;
-			/* Access to the root dir isn't allowed. This can happen if the root is on a fuse
-			 * filesystem, such as in a toolbox container. We will never have a fuse rootfs
-			 * in the flatpak case, so in that case its safe to ignore this and
-			 * continue to detect other types of apps. */
-			if (statfs(root_path, &buf) == 0 &&
-			    buf.f_type == 0x65735546) /* FUSE_SUPER_MAGIC */
-				return 0;
-		}
-		/* Not able to open the root dir shouldn't happen. Probably the app died and
-		 * we're failing due to /proc/$pid not existing. In that case fail instead
-		 * of treating this as privileged. */
-		pw_log_info("failed to open \"%s\": %s", root_path, spa_strerror(res));
-		return res;
-	}
-	info_fd = openat (root_fd, ".flatpak-info", O_RDONLY | O_CLOEXEC | O_NOCTTY);
-	close (root_fd);
-	if (info_fd == -1) {
-		if (errno == ENOENT) {
-			pw_log_debug("no .flatpak-info, client on the host");
-			/* No file => on the host */
-			return 0;
-		}
-		res = -errno;
-		pw_log_error("error opening .flatpak-info: %m");
-		return res;
-        }
-	if (fstat (info_fd, &stat_buf) != 0 || !S_ISREG (stat_buf.st_mode)) {
-		/* Some weird fd => failure, assume sandboxed */
-		pw_log_error("error fstat .flatpak-info: %m");
-	}
-	close(info_fd);
-	return 1;
-}
-#endif
-
 static void
 context_check_access(void *data, struct pw_impl_client *client)
 {
@@ -240,6 +197,8 @@ context_check_access(void *data, struct pw_impl_client *client)
 	struct spa_dict_item items[2];
 	const struct pw_properties *props;
 	const char *str, *access;
+	char *flatpak_app_id = NULL;
+	int nitems = 0;
 	int pid, res;
 
 	pid = -EINVAL;
@@ -298,8 +257,7 @@ context_check_access(void *data, struct pw_impl_client *client)
 	    (access = pw_properties_get(impl->properties, "access.force")) != NULL)
 		goto wait_permissions;
 
-#if defined(__linux__)
-	res = check_flatpak(client, pid);
+	res = pw_check_flatpak(pid, &flatpak_app_id, NULL);
 	if (res != 0) {
 		if (res < 0) {
 			if (res == -EACCES) {
@@ -313,9 +271,11 @@ context_check_access(void *data, struct pw_impl_client *client)
 			pw_log_debug(" %p: flatpak client %p added", impl, client);
 		}
 		access = "flatpak";
+		items[nitems++] = SPA_DICT_ITEM_INIT("pipewire.access.portal.app_id",
+				flatpak_app_id);
 		goto wait_permissions;
 	}
-#endif
+
 	if ((access = pw_properties_get(props, PW_KEY_CLIENT_ACCESS)) == NULL)
 		access = "unrestricted";
 
@@ -326,24 +286,28 @@ context_check_access(void *data, struct pw_impl_client *client)
 
 granted:
 	pw_log_info("%p: client %p '%s' access granted", impl, client, access);
-	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_ACCESS, access);
-	pw_impl_client_update_properties(client, &SPA_DICT_INIT(items, 1));
+	items[nitems++] = SPA_DICT_ITEM_INIT(PW_KEY_ACCESS, access);
+	pw_impl_client_update_properties(client, &SPA_DICT_INIT(items, nitems));
 
 	permissions[0] = PW_PERMISSION_INIT(PW_ID_ANY, PW_PERM_ALL);
 	pw_impl_client_update_permissions(client, 1, permissions);
-	return;
+	goto done;
 
 wait_permissions:
 	pw_log_info("%p: client %p wait for '%s' permissions",
 			impl, client, access);
-	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_ACCESS, access);
-	pw_impl_client_update_properties(client, &SPA_DICT_INIT(items, 1));
-	return;
+	items[nitems++] = SPA_DICT_ITEM_INIT(PW_KEY_ACCESS, access);
+	pw_impl_client_update_properties(client, &SPA_DICT_INIT(items, nitems));
+	goto done;
 
 rejected:
 	pw_resource_error(pw_impl_client_get_core_resource(client), res, access);
-	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_ACCESS, access);
-	pw_impl_client_update_properties(client, &SPA_DICT_INIT(items, 1));
+	items[nitems++] = SPA_DICT_ITEM_INIT(PW_KEY_ACCESS, access);
+	pw_impl_client_update_properties(client, &SPA_DICT_INIT(items, nitems));
+	goto done;
+
+done:
+	free(flatpak_app_id);
 	return;
 }
 

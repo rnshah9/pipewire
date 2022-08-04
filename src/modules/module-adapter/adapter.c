@@ -95,7 +95,7 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 	struct pw_properties *new;
 	const char *str, *path, *desc, *nick, *name, *node_name, *media_class;
 	char position[8], *prefix;
-	bool is_monitor, is_device, is_duplex, is_virtual;
+	bool is_monitor, is_device, is_duplex, is_virtual, is_control = false;
 
 	direction = pw_impl_port_get_direction(port);
 
@@ -104,6 +104,9 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 	is_monitor = pw_properties_get_bool(old, PW_KEY_PORT_MONITOR, false);
 	if (!is_monitor && direction != n->direction)
 		return;
+
+	if ((str = pw_properties_get(old, PW_KEY_FORMAT_DSP)) != NULL)
+		is_control = spa_streq(str, "8 bit raw midi");
 
 	path = pw_properties_get(n->props, PW_KEY_OBJECT_PATH);
 	media_class = pw_properties_get(n->props, PW_KEY_MEDIA_CLASS);
@@ -120,7 +123,10 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 
 	new = pw_properties_new(NULL, NULL);
 
-	if (is_duplex)
+	if (is_control)
+		prefix = direction == PW_DIRECTION_INPUT ?
+			"control" : "notify";
+	else if (is_duplex)
 		prefix = direction == PW_DIRECTION_INPUT ?
 			"playback" : "capture";
 	else if (is_virtual)
@@ -156,13 +162,20 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 	pw_properties_setf(new, PW_KEY_OBJECT_PATH, "%s:%s_%d",
 			path ? path : node_name, prefix, pw_impl_port_get_id(port));
 
-	pw_properties_setf(new, PW_KEY_PORT_NAME, "%s_%s", prefix, str);
+	if (is_control)
+		pw_properties_setf(new, PW_KEY_PORT_NAME, "%s", prefix);
+	else
+		pw_properties_setf(new, PW_KEY_PORT_NAME, "%s_%s", prefix, str);
 
 	if ((node_name = nick) == NULL && (node_name = desc) == NULL &&
 	    (node_name = name) == NULL)
 		node_name = "node";
 
-	pw_properties_setf(new, PW_KEY_PORT_ALIAS, "%s:%s_%s",
+	if (is_control)
+		pw_properties_setf(new, PW_KEY_PORT_ALIAS, "%s:%s",
+			node_name, prefix);
+	else
+		pw_properties_setf(new, PW_KEY_PORT_ALIAS, "%s:%s_%s",
 			node_name, prefix, str);
 
 	pw_impl_port_update_properties(port, &new->dict);
@@ -240,7 +253,7 @@ static int do_auto_port_config(struct node *n, const char *str)
 	int res, position = POSITION_PRESERVE;
 	struct spa_pod *param;
 	uint32_t media_type, media_subtype;
-	bool have_format = false, monitor = false;
+	bool have_format = false, monitor = false, control = false;
 	struct spa_audio_info format = { 0, };
 	enum spa_param_port_config_mode mode = SPA_PARAM_PORT_CONFIG_MODE_none;
 	struct spa_json it[2];
@@ -260,6 +273,8 @@ static int do_auto_port_config(struct node *n, const char *str)
 				mode = SPA_PARAM_PORT_CONFIG_MODE_none;
 		} else if (spa_streq(key, "monitor")) {
 			monitor = spa_atob(val);
+		} else if (spa_streq(key, "control")) {
+			control = spa_atob(val);
 		} else if (spa_streq(key, "position")) {
 			if (spa_streq(val, "unknown"))
 				position = POSITION_UNKNOWN;
@@ -331,6 +346,7 @@ static int do_auto_port_config(struct node *n, const char *str)
 		SPA_PARAM_PORT_CONFIG_direction, SPA_POD_Id(n->direction),
 		SPA_PARAM_PORT_CONFIG_mode,      SPA_POD_Id(mode),
 		SPA_PARAM_PORT_CONFIG_monitor,   SPA_POD_Bool(monitor),
+		SPA_PARAM_PORT_CONFIG_control,   SPA_POD_Bool(control),
 		SPA_PARAM_PORT_CONFIG_format,    SPA_POD_Pod(param));
 	pw_impl_node_set_param(n->node, SPA_PARAM_PortConfig, 0, param);
 

@@ -50,19 +50,17 @@ static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.eac.webrtc");
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
 
-static bool webrtc_get_spa_bool(const struct spa_dict *args, const char *key, bool default_value) {
-	const char *str_val;
-	bool value = default_value;
-	str_val = spa_dict_lookup(args, key);
-	if (str_val != NULL)
-		value =spa_atob(str_val);
+static bool webrtc_get_spa_bool(const struct spa_dict *args, const char *key, bool default_value)
+{
+	if (auto str = spa_dict_lookup(args, key))
+		return spa_atob(str);
 
-	return value;
+	return default_value;
 }
 
-static int webrtc_init(void *data, const struct spa_dict *args, const struct spa_audio_info_raw *info)
+static int webrtc_init(void *object, const struct spa_dict *args, const struct spa_audio_info_raw *info)
 {
-	auto impl = reinterpret_cast<struct impl_data*>(data);
+	auto impl = static_cast<struct impl_data*>(object);
 
 	bool extended_filter = webrtc_get_spa_bool(args, "webrtc.extended_filter", true);
 	bool delay_agnostic = webrtc_get_spa_bool(args, "webrtc.delay_agnostic", true);
@@ -122,9 +120,9 @@ static int webrtc_init(void *data, const struct spa_dict *args, const struct spa
 	return 0;
 }
 
-static int webrtc_run(void *data, const float *rec[], const float *play[], float *out[], uint32_t n_samples)
+static int webrtc_run(void *object, const float *rec[], const float *play[], float *out[], uint32_t n_samples)
 {
-	auto impl = reinterpret_cast<struct impl_data*>(data);
+	auto impl = static_cast<struct impl_data*>(object);
 	webrtc::StreamConfig config =
 		webrtc::StreamConfig(impl->info.rate, impl->info.channels, false);
 	unsigned int num_blocks = n_samples * 1000 / impl->info.rate / 10;
@@ -160,7 +158,7 @@ static int webrtc_run(void *data, const float *rec[], const float *play[], float
 	return 0;
 }
 
-static struct spa_audio_aec_methods impl_aec = {
+static const struct spa_audio_aec_methods impl_aec = {
 	SPA_VERSION_AUDIO_AEC_METHODS,
 	.add_listener = NULL,
 	.init = webrtc_init,
@@ -220,7 +218,7 @@ impl_init(const struct spa_handle_factory *factory,
 	impl->aec.info = NULL;
 	impl->aec.latency = "480/48000",
 
-	impl->log = (struct spa_log*)spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	impl->log = static_cast<struct spa_log *>(spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log));
 	spa_log_topic_init(impl->log, &log_topic);
 
 	return 0;
@@ -250,7 +248,7 @@ impl_enum_interface_info(const struct spa_handle_factory *factory,
 	return 1;
 }
 
-const struct spa_handle_factory spa_aec_webrtc_factory = {
+static const struct spa_handle_factory spa_aec_webrtc_factory = {
 	SPA_VERSION_HANDLE_FACTORY,
 	SPA_NAME_AEC,
 	NULL,
@@ -258,7 +256,6 @@ const struct spa_handle_factory spa_aec_webrtc_factory = {
 	impl_init,
 	impl_enum_interface_info,
 };
-
 
 SPA_EXPORT
 int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t *index)

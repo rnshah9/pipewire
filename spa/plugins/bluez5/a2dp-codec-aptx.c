@@ -218,7 +218,7 @@ static int codec_select_config_ll(const struct a2dp_codec *codec, uint32_t flags
 	return actual_conf_size;
 }
 
-static int codec_enum_config(const struct a2dp_codec *codec,
+static int codec_enum_config(const struct a2dp_codec *codec, uint32_t flags,
 		const void *caps, size_t caps_size, uint32_t id, uint32_t idx,
 		struct spa_pod_builder *b, struct spa_pod **param)
 {
@@ -458,7 +458,7 @@ static int codec_decode(void *data,
  * When connected as SRC to SNK, aptX-LL sink may send back mSBC data.
  */
 
-static int msbc_enum_config(const struct a2dp_codec *codec,
+static int msbc_enum_config(const struct a2dp_codec *codec, uint32_t flags,
 		const void *caps, size_t caps_size, uint32_t id, uint32_t idx,
 		struct spa_pod_builder *b, struct spa_pod **param)
 {
@@ -710,6 +710,11 @@ static const struct a2dp_codec aptx_ll_msbc = {
 	.increase_bitpool = msbc_increase_bitpool,
 };
 
+static const struct spa_dict_item duplex_info_items[] = {
+	{ "duplex.boost", "true" },
+};
+static const struct spa_dict duplex_info = SPA_DICT_INIT_ARRAY(duplex_info_items);
+
 const struct a2dp_codec a2dp_codec_aptx_ll_duplex_0 = {
 	APTX_LL_COMMON_DEFS,
 	.id = SPA_BLUETOOTH_AUDIO_CODEC_APTX_LL_DUPLEX,
@@ -718,6 +723,7 @@ const struct a2dp_codec a2dp_codec_aptx_ll_duplex_0 = {
 	.name = "aptx_ll_duplex",
 	.endpoint_name = "aptx_ll_duplex_0",
 	.duplex_codec = &aptx_ll_msbc,
+	.info = &duplex_info,
 };
 
 const struct a2dp_codec a2dp_codec_aptx_ll_duplex_1 = {
@@ -728,6 +734,7 @@ const struct a2dp_codec a2dp_codec_aptx_ll_duplex_1 = {
 	.name = "aptx_ll_duplex",
 	.endpoint_name = "aptx_ll_duplex_1",
 	.duplex_codec = &aptx_ll_msbc,
+	.info = &duplex_info,
 };
 
 A2DP_CODEC_EXPORT_DEF(

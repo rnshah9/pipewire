@@ -137,6 +137,8 @@ struct impl {
 	unsigned int started:1;
 	unsigned int following:1;
 
+	unsigned int is_duplex:1;
+
 	struct spa_source source;
 	int timerfd;
 	struct spa_source flush_source;
@@ -743,7 +745,7 @@ again:
 		 * => timeout = (quantum - max_excess)/quantum * packet_time
 		 */
 		uint64_t max_excess = 2*256;
-		uint64_t packet_samples = this->frame_count * this->block_size / port->frame_size;
+		uint64_t packet_samples = (uint64_t)this->frame_count * this->block_size / port->frame_size;
 		uint64_t packet_time = packet_samples * SPA_NSEC_PER_SEC / port->current_format.info.raw.rate;
 		uint64_t quantum = SPA_LIKELY(this->clock) ? this->clock->duration : 0;
 		uint64_t timeout = (quantum > max_excess) ?
@@ -843,7 +845,7 @@ static void a2dp_on_timeout(struct spa_source *source)
 	prev_time = this->current_time;
 	now_time = this->current_time = this->next_time;
 
-	spa_log_debug(this->log, "%p: timeout %"PRIu64" %"PRIu64"", this,
+	spa_log_debug(this->log, "%p: timer %"PRIu64" %"PRIu64"", this,
 			now_time, now_time - prev_time);
 
 	if (SPA_LIKELY(this->position)) {
@@ -908,7 +910,8 @@ static int do_start(struct impl *this)
 	for (i = 0; i < size; i++)
 		spa_log_debug(this->log, "  %d: %02x", i, conf[i]);
 
-	this->codec_data = this->codec->init(this->codec, 0,
+	this->codec_data = this->codec->init(this->codec,
+			this->is_duplex ? A2DP_CODEC_FLAG_SINK : 0,
 			this->transport->configuration,
 			this->transport->configuration_len,
 			&port->current_format,
@@ -1195,6 +1198,7 @@ impl_node_port_enum_params(void *object, int seq,
 			return -EIO;
 
 		if ((res = this->codec->enum_config(this->codec,
+					this->is_duplex ? A2DP_CODEC_FLAG_SINK : 0,
 					this->transport->configuration,
 					this->transport->configuration_len,
 					id, result.index, &b, &param)) != 1)
@@ -1460,6 +1464,11 @@ static int impl_node_process(void *object)
 	io = port->io;
 	spa_return_val_if_fail(io != NULL, -EIO);
 
+	if (this->position && this->position->clock.flags & SPA_IO_CLOCK_FLAG_FREEWHEEL) {
+		io->status = SPA_STATUS_NEED_DATA;
+		return SPA_STATUS_HAVE_DATA;
+	}
+
 	if (io->status == SPA_STATUS_HAVE_DATA && io->buffer_id < port->n_buffers) {
 		struct buffer *b = &port->buffers[io->buffer_id];
 
@@ -1478,6 +1487,15 @@ static int impl_node_process(void *object)
 		io->status = SPA_STATUS_OK;
 	}
 	if (!spa_list_is_empty(&port->ready)) {
+		if (this->following) {
+			if (this->position) {
+				this->current_time = this->position->clock.nsec;
+			} else {
+				struct timespec now;
+				spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &now);
+				this->current_time = SPA_TIMESPEC_TO_NSEC(&now);
+			}
+		}
 		if (this->need_flush)
 			reset_buffer(this);
 		flush_data(this, this->current_time);
@@ -1531,9 +1549,43 @@ static void transport_destroy(void *data)
 	spa_loop_invoke(this->data_loop, do_transport_destroy, 0, NULL, 0, true, this);
 }
 
+static void transport_state_changed(void *data,
+	enum spa_bt_transport_state old,
+	enum spa_bt_transport_state state)
+{
+	struct impl *this = data;
+
+	spa_log_debug(this->log, "%p: transport %p state %d->%d", this, this->transport, old, state);
+
+	if (state < SPA_BT_TRANSPORT_STATE_ACTIVE && old == SPA_BT_TRANSPORT_STATE_ACTIVE &&
+			this->started) {
+		uint8_t buffer[1024];
+		struct spa_pod_builder b = { 0 };
+
+		spa_log_debug(this->log, "%p: transport %p becomes inactive: stop and indicate error",
+				this, this->transport);
+
+		/*
+		 * If establishing connection fails due to remote end not activating
+		 * the transport, we won't get a write error, but instead see a transport
+		 * state change.
+		 *
+		 * Stop and emit a node error, to let upper levels handle it.
+		 */
+
+		do_stop(this);
+
+		spa_pod_builder_init(&b, buffer, sizeof(buffer));
+		spa_node_emit_event(&this->hooks,
+				spa_pod_builder_add_object(&b,
+						SPA_TYPE_EVENT_Node, SPA_NODE_EVENT_Error));
+	}
+}
+
 static const struct spa_bt_transport_events transport_events = {
 	SPA_VERSION_BT_TRANSPORT_EVENTS,
 	.delay_changed = transport_delay_changed,
+	.state_changed = transport_state_changed,
 	.destroy = transport_destroy,
 };
 
@@ -1649,6 +1701,9 @@ impl_init(const struct spa_handle_factory *factory,
 
 	spa_list_init(&port->ready);
 
+	if (info && (str = spa_dict_lookup(info, "api.bluez5.a2dp-duplex")) != NULL)
+		this->is_duplex = spa_atob(str);
+
 	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_BLUEZ5_TRANSPORT)))
 		sscanf(str, "pointer:%p", &this->transport);
 
@@ -1660,9 +1715,20 @@ impl_init(const struct spa_handle_factory *factory,
 		spa_log_error(this->log, "a transport codec is needed");
 		return -EINVAL;
 	}
+
 	this->codec = this->transport->a2dp_codec;
+
+	if (this->is_duplex) {
+		if (!this->codec->duplex_codec) {
+			spa_log_error(this->log, "transport codec doesn't support duplex");
+			return -EINVAL;
+		}
+		this->codec = this->codec->duplex_codec;
+	}
+
 	if (this->codec->init_props != NULL)
 		this->codec_props = this->codec->init_props(this->codec,
+					this->is_duplex ? A2DP_CODEC_FLAG_SINK : 0,
 					this->transport->device->settings);
 
 	reset_props(this, &this->props);

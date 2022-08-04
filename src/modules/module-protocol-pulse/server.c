@@ -60,13 +60,13 @@
 #include "server.h"
 #include "stream.h"
 #include "utils.h"
+#include "flatpak-utils.h"
 
 #define LISTEN_BACKLOG 32
 #define MAX_CLIENTS 64
 
 static int handle_packet(struct client *client, struct message *msg)
 {
-	struct impl * const impl = client->impl;
 	uint32_t command, tag;
 	int res = 0;
 
@@ -110,7 +110,7 @@ static int handle_packet(struct client *client, struct message *msg)
 	res = cmd->run(client, command, tag, msg);
 
 finish:
-	message_free(impl, msg, false, false);
+	message_free(msg, false, false);
 	if (res < 0)
 		reply_error(client, command, tag, res);
 
@@ -119,7 +119,6 @@ finish:
 
 static int handle_memblock(struct client *client, struct message *msg)
 {
-	struct impl * const impl = client->impl;
 	struct stream *stream;
 	uint32_t channel, flags, index;
 	int64_t offset, diff;
@@ -190,7 +189,7 @@ static int handle_memblock(struct client *client, struct message *msg)
 	stream_send_request(stream);
 
 finish:
-	message_free(impl, msg, false, false);
+	message_free(msg, false, false);
 	return res;
 }
 
@@ -264,7 +263,7 @@ static int do_read(struct client *client)
 		}
 
 		if (client->message)
-			message_free(impl, client->message, false, false);
+			message_free(client->message, false, false);
 
 		client->message = message_alloc(impl, channel, length);
 	} else if (client->message &&
@@ -419,14 +418,47 @@ on_connect(void *data, int fd, uint32_t mask)
 		client_access = server->client_access;
 
 	if (server->addr.ss_family == AF_UNIX) {
+		char *app_id = NULL, *devices = NULL;
+
 #ifdef SO_PRIORITY
 		val = 6;
 		if (setsockopt(client_fd, SOL_SOCKET, SO_PRIORITY, &val, sizeof(val)) < 0)
 			pw_log_warn("setsockopt(SO_PRIORITY) failed: %m");
 #endif
 		pid = get_client_pid(client, client_fd);
-		if (pid != 0 && check_flatpak(client, pid) == 1)
+		if (pid != 0 && pw_check_flatpak(pid, &app_id, &devices) == 1) {
+			/*
+			 * XXX: we should really use Portal client access here
+			 *
+			 * However, session managers currently support only camera
+			 * permissions, and the XDG Portal doesn't have a "Sound Manager"
+			 * permission defined. So for now, use access=flatpak, and determine
+			 * extra permissions here.
+			 *
+			 * The application has access to the Pulseaudio socket,
+			 * and with real PA it would always then have full sound access.
+			 * We'll restrict the full access here behind devices=all;
+			 * if the application can access all devices it can then
+			 * also sound and camera devices directly, so granting also the
+			 * Manager permissions here is reasonable.
+			 *
+			 * The "Manager" permission in any case is also currently not safe
+			 * as the session manager does not check any permission store
+			 * for it.
+			 */
 			client_access = "flatpak";
+			pw_properties_set(client->props, "pipewire.access.portal.app_id",
+					app_id);
+
+			if (devices && (spa_streq(devices, "all") ||
+							spa_strstartswith(devices, "all;") ||
+							strstr(devices, ";all;")))
+				pw_properties_set(client->props, PW_KEY_MEDIA_CATEGORY, "Manager");
+			else
+				pw_properties_set(client->props, PW_KEY_MEDIA_CATEGORY, NULL);
+		}
+		free(devices);
+		free(app_id);
 	}
 	else if (server->addr.ss_family == AF_INET || server->addr.ss_family == AF_INET6) {
 
@@ -460,7 +492,7 @@ static int parse_unix_address(const char *address, struct sockaddr_storage *addr
 	if (address[0] != '/') {
 		char runtime_dir[PATH_MAX];
 
-		if ((res = get_runtime_dir(runtime_dir, sizeof(runtime_dir), "pulse")) < 0)
+		if ((res = get_runtime_dir(runtime_dir, sizeof(runtime_dir))) < 0)
 			return res;
 
 		res = snprintf(addr.sun_path, sizeof(addr.sun_path),
